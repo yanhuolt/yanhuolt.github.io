@@ -10,7 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from scipy import stats
+from scipy.optimize import curve_fit
 from typing import List, Dict, Tuple, Optional
+from enum import Enum
+from dataclasses import dataclass
 import warnings
 import os
 warnings.filterwarnings('ignore')
@@ -18,6 +21,230 @@ warnings.filterwarnings('ignore')
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
+
+class WarningLevel(Enum):
+    """预警等级"""
+    GREEN = "绿色"      # 无需更换
+    YELLOW = "黄色"     # 适时更换
+    ORANGE = "橙色"     # 立即更换
+    RED = "红色"        # 立即更换
+
+@dataclass
+class WarningEvent:
+    """预警事件"""
+    timestamp: float
+    warning_level: WarningLevel
+    breakthrough_ratio: float  # 穿透率 %
+    efficiency: float         # 吸附效率 %
+    reason: str              # 预警原因
+    recommendation: str      # 建议措施
+    predicted_saturation_time: Optional[float] = None  # 预计饱和时间
+
+class LogisticWarningModel:
+    """基于Logistic模型的预警系统"""
+
+    def __init__(self,
+                 breakthrough_start_threshold: float = 0.05,  # 穿透起始点阈值 5%
+                 saturation_threshold: float = 0.95,         # 饱和点阈值 95%
+                 warning_ratio: float = 0.8):                # 预警点比例 80%
+        """
+        初始化预警模型
+
+        参数:
+            breakthrough_start_threshold: 穿透起始点阈值
+            saturation_threshold: 饱和点阈值
+            warning_ratio: 预警点比例（从穿透起始到饱和的80%）
+        """
+        self.breakthrough_start_threshold = breakthrough_start_threshold
+        self.saturation_threshold = saturation_threshold
+        self.warning_ratio = warning_ratio
+
+        self.params = None
+        self.fitted = False
+        self.breakthrough_start_time = None
+        self.predicted_saturation_time = None
+        self.warning_time = None
+
+    @staticmethod
+    def logistic_function(t, A, k, t0):
+        """
+        Logistic函数: C/C0 = A / (1 + exp(-k*(t-t0)))
+
+        参数:
+            t: 时间
+            A: 最大穿透率（通常接近1）
+            k: 增长率
+            t0: 拐点时间
+        """
+        return A / (1 + np.exp(-k * (t - t0)))
+
+    def fit_model(self, time_data: np.array, efficiency_data: np.array) -> bool:
+        """
+        拟合Logistic模型
+
+        参数:
+            time_data: 时间数据
+            efficiency_data: 吸附效率数据
+
+        返回:
+            是否拟合成功
+        """
+        try:
+            # 将效率转换为穿透率
+            breakthrough_data = (100 - efficiency_data) / 100
+            breakthrough_data = np.clip(breakthrough_data, 0.001, 0.999)
+
+            # 过滤有效数据
+            valid_mask = (breakthrough_data > 0) & (breakthrough_data < 1) & (time_data > 0)
+            if np.sum(valid_mask) < 5:  # 至少需要5个数据点
+                print("数据点不足，无法拟合Logistic模型")
+                return False
+
+            t_valid = time_data[valid_mask]
+            bt_valid = breakthrough_data[valid_mask]
+
+            # 初始参数估计
+            A_init = 0.95  # 最大穿透率
+            k_init = 0.0001  # 增长率
+            t0_init = np.median(t_valid)  # 拐点时间
+
+            # 拟合
+            self.params, _ = curve_fit(
+                self.logistic_function,
+                t_valid, bt_valid,
+                p0=[A_init, k_init, t0_init],
+                bounds=([0.5, 0.00001, 0], [1.0, 0.01, np.max(t_valid)*2]),
+                maxfev=3000
+            )
+
+            self.fitted = True
+
+            # 计算关键时间点
+            self._calculate_key_timepoints(t_valid)
+
+            print(f"Logistic模型拟合成功: A={self.params[0]:.3f}, k={self.params[1]:.6f}, t0={self.params[2]:.1f}")
+            return True
+
+        except Exception as e:
+            print(f"Logistic模型拟合失败: {e}")
+            return False
+
+    def _calculate_key_timepoints(self, time_data: np.array):
+        """计算关键时间点"""
+        if not self.fitted:
+            return
+
+        A, k, t0 = self.params
+
+        # 计算穿透起始时间（5%穿透率）
+        try:
+            if A > self.breakthrough_start_threshold:
+                self.breakthrough_start_time = t0 - np.log(A / self.breakthrough_start_threshold - 1) / k
+                if self.breakthrough_start_time < 0:
+                    self.breakthrough_start_time = np.min(time_data)
+            else:
+                self.breakthrough_start_time = np.min(time_data)
+        except:
+            self.breakthrough_start_time = np.min(time_data)
+
+        # 计算饱和时间（95%穿透率）
+        try:
+            if A > self.saturation_threshold:
+                self.predicted_saturation_time = t0 - np.log(A / self.saturation_threshold - 1) / k
+            else:
+                # 如果模型预测的最大穿透率小于95%，则使用外推
+                self.predicted_saturation_time = np.max(time_data) * 1.5
+        except:
+            self.predicted_saturation_time = np.max(time_data) * 1.5
+
+        # 计算预警时间（穿透起始到饱和的80%）
+        if self.breakthrough_start_time is not None and self.predicted_saturation_time is not None:
+            time_span = self.predicted_saturation_time - self.breakthrough_start_time
+            self.warning_time = self.breakthrough_start_time + time_span * self.warning_ratio
+
+        print(f"关键时间点计算:")
+        print(f"  穿透起始时间: {self.breakthrough_start_time:.1f}s")
+        print(f"  预警时间: {self.warning_time:.1f}s")
+        print(f"  预测饱和时间: {self.predicted_saturation_time:.1f}s")
+
+    def predict_breakthrough(self, time_points: np.array) -> np.array:
+        """预测指定时间点的穿透率"""
+        if not self.fitted:
+            return np.zeros_like(time_points)
+
+        return self.logistic_function(time_points, *self.params)
+
+    def get_warning_level(self, current_time: float, current_efficiency: float) -> WarningLevel:
+        """
+        根据当前时间和效率确定预警等级
+
+        参数:
+            current_time: 当前时间
+            current_efficiency: 当前吸附效率
+
+        返回:
+            预警等级
+        """
+        current_breakthrough = (100 - current_efficiency) / 100
+
+        # 基于穿透率的预警
+        if current_breakthrough <= self.breakthrough_start_threshold:
+            return WarningLevel.GREEN
+        elif current_breakthrough >= self.saturation_threshold:
+            return WarningLevel.RED
+
+        # 基于时间的预警（如果模型已拟合）
+        if self.fitted and self.warning_time is not None and self.predicted_saturation_time is not None:
+            if current_time >= self.predicted_saturation_time:
+                return WarningLevel.RED
+            elif current_time >= self.warning_time:
+                return WarningLevel.ORANGE
+            elif current_breakthrough > self.breakthrough_start_threshold:
+                return WarningLevel.YELLOW
+
+        # 仅基于穿透率的预警
+        if current_breakthrough > 0.8:  # 80%穿透率
+            return WarningLevel.ORANGE
+        elif current_breakthrough > self.breakthrough_start_threshold:
+            return WarningLevel.YELLOW
+
+        return WarningLevel.GREEN
+
+    def generate_warning_event(self, current_time: float, current_efficiency: float) -> Optional[WarningEvent]:
+        """生成预警事件"""
+        level = self.get_warning_level(current_time, current_efficiency)
+
+        if level == WarningLevel.GREEN:
+            return None
+
+        current_breakthrough = (100 - current_efficiency) / 100
+
+        # 生成预警原因和建议
+        if level == WarningLevel.YELLOW:
+            reason = f"穿透率达到{current_breakthrough*100:.1f}%，已超过起始点阈值"
+            recommendation = "建议开始准备更换活性炭，监控穿透率变化趋势"
+        elif level == WarningLevel.ORANGE:
+            if self.warning_time and current_time >= self.warning_time:
+                reason = f"已达到预警时间点({self.warning_time:.1f}s)，穿透率{current_breakthrough*100:.1f}%"
+            else:
+                reason = f"穿透率达到{current_breakthrough*100:.1f}%，接近饱和状态"
+            recommendation = "立即安排更换活性炭，设备处于非稳定运行状态"
+        else:  # RED
+            if self.predicted_saturation_time and current_time >= self.predicted_saturation_time:
+                reason = f"已达到预测饱和时间({self.predicted_saturation_time:.1f}s)"
+            else:
+                reason = f"穿透率达到{current_breakthrough*100:.1f}%，活性炭已饱和"
+            recommendation = "紧急更换活性炭！设备已无法正常净化VOCs"
+
+        return WarningEvent(
+            timestamp=current_time,
+            warning_level=level,
+            breakthrough_ratio=current_breakthrough * 100,
+            efficiency=current_efficiency,
+            reason=reason,
+            recommendation=recommendation,
+            predicted_saturation_time=self.predicted_saturation_time
+        )
 
 class AdsorptionCurveProcessor:
     """抽取式吸附曲线完整处理器"""
@@ -31,6 +258,10 @@ class AdsorptionCurveProcessor:
         self.cleaned_data_boxplot = None
         self.efficiency_data_ks = None
         self.efficiency_data_boxplot = None
+
+        # 预警系统
+        self.warning_model = LogisticWarningModel()
+        self.warning_events = []
         
     def load_data(self) -> bool:
         """加载原始数据 - 支持CSV、XLSX、XLS格式"""
@@ -664,6 +895,221 @@ class AdsorptionCurveProcessor:
         plt.tight_layout()
         return fig
 
+    def analyze_warning_system(self):
+        """分析预警系统"""
+        # 选择最佳的效率数据进行预警分析
+        efficiency_data = None
+        method_name = ""
+
+        if self.efficiency_data_ks is not None and len(self.efficiency_data_ks) > 0:
+            efficiency_data = self.efficiency_data_ks
+            method_name = "K-S检验"
+        elif self.efficiency_data_boxplot is not None and len(self.efficiency_data_boxplot) > 0:
+            efficiency_data = self.efficiency_data_boxplot
+            method_name = "箱型图"
+
+        if efficiency_data is None or len(efficiency_data) == 0:
+            print("无有效效率数据，跳过预警分析")
+            return
+
+        print(f"使用{method_name}清洗后的数据进行预警分析")
+        print(f"效率数据点数: {len(efficiency_data)}")
+
+        # 准备数据
+        time_data = efficiency_data['time'].values
+        efficiency_values = efficiency_data['efficiency'].values
+
+        # 拟合Logistic模型
+        if self.warning_model.fit_model(time_data, efficiency_values):
+            print("Logistic模型拟合成功")
+
+            # 生成预警事件
+            self.warning_events = []
+            for _, row in efficiency_data.iterrows():
+                event = self.warning_model.generate_warning_event(row['time'], row['efficiency'])
+                if event is not None:
+                    self.warning_events.append(event)
+
+            print(f"生成预警事件: {len(self.warning_events)} 个")
+
+            # 显示预警摘要
+            self._display_warning_summary()
+
+        else:
+            print("Logistic模型拟合失败，无法进行预警分析")
+
+    def _display_warning_summary(self):
+        """显示预警摘要"""
+        if not self.warning_events:
+            print("✅ 当前无预警事件，设备运行正常")
+            return
+
+        print(f"\n⚠️  检测到 {len(self.warning_events)} 个预警事件:")
+
+        # 按预警等级分类
+        warning_counts = {}
+        latest_event = None
+
+        for event in self.warning_events:
+            level = event.warning_level.value
+            warning_counts[level] = warning_counts.get(level, 0) + 1
+
+            if latest_event is None or event.timestamp > latest_event.timestamp:
+                latest_event = event
+
+        # 显示统计
+        for level, count in warning_counts.items():
+            print(f"  {level}: {count} 次")
+
+        # 显示最新预警
+        if latest_event:
+            print(f"\n🚨 最新预警状态: {latest_event.warning_level.value}")
+            print(f"   时间: {latest_event.timestamp:.1f}s")
+            print(f"   穿透率: {latest_event.breakthrough_ratio:.1f}%")
+            print(f"   吸附效率: {latest_event.efficiency:.1f}%")
+            print(f"   原因: {latest_event.reason}")
+            print(f"   建议: {latest_event.recommendation}")
+
+            if latest_event.predicted_saturation_time:
+                print(f"   预测饱和时间: {latest_event.predicted_saturation_time:.1f}s")
+
+        # 显示关键时间点
+        if self.warning_model.fitted:
+            print(f"\n📊 关键时间点预测:")
+            if self.warning_model.breakthrough_start_time:
+                print(f"   穿透起始时间: {self.warning_model.breakthrough_start_time:.1f}s")
+            if self.warning_model.warning_time:
+                print(f"   预警时间: {self.warning_model.warning_time:.1f}s")
+            if self.warning_model.predicted_saturation_time:
+                print(f"   预测饱和时间: {self.warning_model.predicted_saturation_time:.1f}s")
+
+    def create_warning_visualization(self, efficiency_data: pd.DataFrame) -> plt.Figure:
+        """创建包含预警信息的可视化图表"""
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('活性炭吸附效率分析与预警系统', fontsize=16, fontweight='bold')
+
+        # 1. 吸附效率趋势图
+        ax1 = axes[0, 0]
+        ax1.plot(efficiency_data['time'], efficiency_data['efficiency'],
+                'b-', linewidth=2, label='吸附效率', alpha=0.8)
+
+        # 添加效率警戒线
+        ax1.axhline(y=80, color='orange', linestyle='--', alpha=0.7, label='效率警戒线(80%)')
+        ax1.axhline(y=60, color='red', linestyle='--', alpha=0.7, label='效率危险线(60%)')
+
+        # 标记预警事件
+        if self.warning_events:
+            warning_times = [event.timestamp for event in self.warning_events]
+            warning_efficiencies = [event.efficiency for event in self.warning_events]
+            warning_colors = []
+
+            for event in self.warning_events:
+                if event.warning_level == WarningLevel.YELLOW:
+                    warning_colors.append('yellow')
+                elif event.warning_level == WarningLevel.ORANGE:
+                    warning_colors.append('orange')
+                elif event.warning_level == WarningLevel.RED:
+                    warning_colors.append('red')
+                else:
+                    warning_colors.append('green')
+
+            ax1.scatter(warning_times, warning_efficiencies, c=warning_colors,
+                       s=100, alpha=0.8, edgecolors='black', linewidth=1,
+                       label='预警事件', zorder=5)
+
+        ax1.set_xlabel('时间 (s)')
+        ax1.set_ylabel('吸附效率 (%)')
+        ax1.set_title('吸附效率变化趋势')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # 2. 穿透率趋势图
+        ax2 = axes[0, 1]
+        breakthrough_ratios = (100 - efficiency_data['efficiency']) / 100 * 100
+        ax2.plot(efficiency_data['time'], breakthrough_ratios,
+                'r-', linewidth=2, label='实际穿透率', alpha=0.8)
+
+        # 添加预警阈值线
+        ax2.axhline(y=5, color='green', linestyle='--', alpha=0.7, label='穿透起始点(5%)')
+        ax2.axhline(y=80, color='orange', linestyle='--', alpha=0.7, label='预警阈值(80%)')
+        ax2.axhline(y=95, color='red', linestyle='--', alpha=0.7, label='饱和阈值(95%)')
+
+        # 如果有Logistic模型拟合结果，绘制拟合曲线和预测
+        if self.warning_model.fitted:
+            time_smooth = np.linspace(efficiency_data['time'].min(),
+                                    efficiency_data['time'].max() * 1.2, 300)
+            bt_smooth = self.warning_model.predict_breakthrough(time_smooth) * 100
+            ax2.plot(time_smooth, bt_smooth, 'g--', linewidth=2,
+                    alpha=0.8, label='Logistic预测曲线')
+
+            # 标记关键时间点
+            if self.warning_model.breakthrough_start_time:
+                ax2.axvline(x=self.warning_model.breakthrough_start_time,
+                           color='green', linestyle=':', alpha=0.8, label='穿透起始时间')
+            if self.warning_model.warning_time:
+                ax2.axvline(x=self.warning_model.warning_time,
+                           color='orange', linestyle=':', alpha=0.8, label='预警时间')
+            if self.warning_model.predicted_saturation_time:
+                ax2.axvline(x=self.warning_model.predicted_saturation_time,
+                           color='red', linestyle=':', alpha=0.8, label='预测饱和时间')
+
+        ax2.set_xlabel('时间 (s)')
+        ax2.set_ylabel('穿透率 (%)')
+        ax2.set_title('穿透率变化趋势与预测')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # 3. 预警状态分布
+        ax3 = axes[1, 0]
+        if self.warning_events:
+            warning_counts = {}
+            for event in self.warning_events:
+                level = event.warning_level.value
+                warning_counts[level] = warning_counts.get(level, 0) + 1
+
+            colors = {'绿色': 'green', '黄色': 'yellow', '橙色': 'orange', '红色': 'red'}
+            pie_colors = [colors.get(level, 'gray') for level in warning_counts.keys()]
+
+            ax3.pie(warning_counts.values(), labels=warning_counts.keys(),
+                   colors=pie_colors, autopct='%1.1f%%', startangle=90)
+            ax3.set_title('预警等级分布')
+        else:
+            ax3.text(0.5, 0.5, '暂无预警事件\n设备运行正常', ha='center', va='center',
+                    transform=ax3.transAxes, fontsize=14,
+                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+            ax3.set_title('预警状态')
+
+        # 4. 预警时间线
+        ax4 = axes[1, 1]
+        if self.warning_events:
+            sorted_events = sorted(self.warning_events, key=lambda x: x.timestamp)
+
+            times = [event.timestamp for event in sorted_events]
+            levels = [event.warning_level.value for event in sorted_events]
+
+            level_colors = {'绿色': 'green', '黄色': 'yellow', '橙色': 'orange', '红色': 'red'}
+            colors = [level_colors.get(level, 'gray') for level in levels]
+
+            ax4.scatter(times, range(len(times)), c=colors, s=100, alpha=0.7)
+
+            ax4.set_yticks(range(len(times)))
+            ax4.set_yticklabels([f"事件{i+1}" for i in range(len(times))])
+
+            # 添加预警等级标签
+            for i, (time, level) in enumerate(zip(times, levels)):
+                ax4.annotate(level, (time, i), xytext=(5, 0),
+                           textcoords='offset points', va='center', fontsize=9)
+        else:
+            ax4.text(0.5, 0.5, '暂无预警事件', ha='center', va='center',
+                    transform=ax4.transAxes, fontsize=14)
+
+        ax4.set_xlabel('时间 (s)')
+        ax4.set_title('预警事件时间线')
+        ax4.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        return fig
+
     def process_and_visualize(self):
         """完整的数据处理和可视化流程"""
         print("=== 抽取式吸附曲线完整数据处理与可视化 ===")
@@ -706,7 +1152,12 @@ class AdsorptionCurveProcessor:
         if len(self.cleaned_data_boxplot) > 0:
             self.efficiency_data_boxplot = self.calculate_efficiency_data(self.cleaned_data_boxplot, "箱型图")
 
-        # 6. 创建可视化
+        # 6. 预警分析
+        print("\n" + "="*40)
+        print("开始预警分析")
+        self.analyze_warning_system()
+
+        # 7. 创建可视化
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # K-S检验可视化
@@ -733,7 +1184,26 @@ class AdsorptionCurveProcessor:
                 print(f"箱型图可视化图片已保存: {filename_box}")
                 plt.show()
 
-        # 7. 保存清洗后的数据
+        # 预警系统可视化
+        if self.warning_events or self.warning_model.fitted:
+            print("\n" + "="*40)
+            print("创建预警系统可视化")
+
+            # 选择最佳的效率数据
+            efficiency_data = None
+            if self.efficiency_data_ks is not None and len(self.efficiency_data_ks) > 0:
+                efficiency_data = self.efficiency_data_ks
+            elif self.efficiency_data_boxplot is not None and len(self.efficiency_data_boxplot) > 0:
+                efficiency_data = self.efficiency_data_boxplot
+
+            if efficiency_data is not None:
+                fig_warning = self.create_warning_visualization(efficiency_data)
+                filename_warning = os.path.join(visualization_dir, f"{self.base_filename}_预警系统_{timestamp}.png")
+                fig_warning.savefig(filename_warning, dpi=300, bbox_inches='tight')
+                print(f"预警系统可视化图片已保存: {filename_warning}")
+                plt.show()
+
+        # 8. 保存清洗后的数据
         if len(self.cleaned_data_ks) > 0:
             ks_filename = os.path.join(cleaned_data_dir, f"{self.base_filename}_KS检验清洗_{timestamp}.csv")
             self.cleaned_data_ks.to_csv(ks_filename, index=False, encoding='utf-8-sig')
@@ -744,8 +1214,89 @@ class AdsorptionCurveProcessor:
             self.cleaned_data_boxplot.to_csv(box_filename, index=False, encoding='utf-8-sig')
             print(f"箱型图清洗数据已保存: {box_filename}")
 
+        # 9. 保存预警报告
+        if self.warning_events or self.warning_model.fitted:
+            self._save_warning_report(cleaned_data_dir, timestamp)
+
         print("\n" + "="*60)
-        print("数据处理与可视化完成！")
+        print("数据处理、可视化与预警分析完成！")
+
+        # 显示最终预警摘要
+        if self.warning_events:
+            print("\n🚨 最终预警摘要:")
+            latest_event = max(self.warning_events, key=lambda x: x.timestamp)
+            print(f"   当前预警状态: {latest_event.warning_level.value}")
+            print(f"   总预警事件数: {len(self.warning_events)}")
+            if self.warning_model.predicted_saturation_time:
+                print(f"   预测饱和时间: {self.warning_model.predicted_saturation_time:.1f}s")
+        else:
+            print("\n✅ 设备运行正常，无预警事件")
+
+    def _save_warning_report(self, output_dir: str, timestamp: str):
+        """保存预警报告"""
+        report_filename = os.path.join(output_dir, f"{self.base_filename}_预警报告_{timestamp}.txt")
+
+        with open(report_filename, 'w', encoding='utf-8') as f:
+            f.write("活性炭更换预警报告\n")
+            f.write("=" * 50 + "\n\n")
+
+            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"数据文件: {self.data_file}\n\n")
+
+            # Logistic模型信息
+            if self.warning_model.fitted:
+                f.write("Logistic模型拟合结果:\n")
+                f.write(f"  参数: A={self.warning_model.params[0]:.3f}, k={self.warning_model.params[1]:.6f}, t0={self.warning_model.params[2]:.1f}\n")
+
+                if self.warning_model.breakthrough_start_time:
+                    f.write(f"  穿透起始时间: {self.warning_model.breakthrough_start_time:.1f}s\n")
+                if self.warning_model.warning_time:
+                    f.write(f"  预警时间: {self.warning_model.warning_time:.1f}s\n")
+                if self.warning_model.predicted_saturation_time:
+                    f.write(f"  预测饱和时间: {self.warning_model.predicted_saturation_time:.1f}s\n")
+                f.write("\n")
+            else:
+                f.write("Logistic模型拟合失败\n\n")
+
+            # 预警事件
+            if self.warning_events:
+                f.write(f"预警事件总数: {len(self.warning_events)}\n\n")
+
+                # 按预警等级分类统计
+                warning_counts = {}
+                for event in self.warning_events:
+                    level = event.warning_level.value
+                    warning_counts[level] = warning_counts.get(level, 0) + 1
+
+                f.write("预警等级统计:\n")
+                for level, count in warning_counts.items():
+                    f.write(f"  {level}: {count} 次\n")
+                f.write("\n")
+
+                # 详细预警事件
+                f.write("详细预警事件:\n")
+                f.write("-" * 40 + "\n")
+
+                for i, event in enumerate(self.warning_events, 1):
+                    f.write(f"\n事件 {i}:\n")
+                    f.write(f"  时间: {event.timestamp:.1f}s\n")
+                    f.write(f"  预警等级: {event.warning_level.value}\n")
+                    f.write(f"  穿透率: {event.breakthrough_ratio:.1f}%\n")
+                    f.write(f"  吸附效率: {event.efficiency:.1f}%\n")
+                    f.write(f"  原因: {event.reason}\n")
+                    f.write(f"  建议: {event.recommendation}\n")
+
+                # 最新预警状态
+                latest_event = max(self.warning_events, key=lambda x: x.timestamp)
+                f.write(f"\n当前预警状态: {latest_event.warning_level.value}\n")
+                f.write(f"最新预警时间: {latest_event.timestamp:.1f}s\n")
+
+            else:
+                f.write("✅ 无预警事件，设备运行正常\n")
+
+            f.write("\n" + "=" * 50 + "\n")
+
+        print(f"预警报告已保存: {report_filename}")
 
 
 def main():
