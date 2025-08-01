@@ -81,9 +81,107 @@ class LogisticWarningModel:
         """
         return A / (1 + np.exp(-k * (t - t0)))
 
+    def _analyze_data_phases(self, t_valid: np.array, bt_valid: np.array) -> dict:
+        """分析数据的不同阶段特征"""
+        from scipy.ndimage import gaussian_filter1d
+
+        # 平滑数据用于分析
+        bt_smooth = gaussian_filter1d(bt_valid, sigma=max(1, len(bt_valid)//10))
+
+        # 计算一阶和二阶导数
+        first_derivative = np.gradient(bt_smooth, t_valid)
+        second_derivative = np.gradient(first_derivative, t_valid)
+
+        # 识别不同阶段
+        phases = {
+            'initial_phase': [],      # 初始缓慢增长阶段
+            'growth_phase': [],       # 快速增长阶段
+            'saturation_phase': []    # 接近饱和阶段
+        }
+
+        # 基于导数变化识别阶段
+        max_growth_rate = np.max(first_derivative)
+        growth_threshold = max_growth_rate * 0.3
+
+        for i in range(len(bt_valid)):
+            if first_derivative[i] < growth_threshold:
+                if bt_valid[i] < np.median(bt_valid):
+                    phases['initial_phase'].append(i)
+                else:
+                    phases['saturation_phase'].append(i)
+            else:
+                phases['growth_phase'].append(i)
+
+        return phases
+
+    def _calculate_dynamic_weights(self, t_valid: np.array, bt_valid: np.array) -> np.array:
+        """基于数据特征计算动态权重"""
+        weights = np.ones_like(bt_valid)
+        phases = self._analyze_data_phases(t_valid, bt_valid)
+
+        # 初始阶段权重：对确定穿透起始点很重要
+        for i in phases['initial_phase']:
+            weights[i] *= 3.0  # 初始阶段权重最高
+
+        # 增长阶段权重：对确定增长率很重要
+        for i in phases['growth_phase']:
+            weights[i] *= 2.0
+
+        # 饱和阶段权重：对确定最大值重要，但不如前两个阶段
+        for i in phases['saturation_phase']:
+            weights[i] *= 1.5
+
+        # 基于数据质量调整权重
+        # 数据变化较大的点权重降低（可能是噪声）
+        if len(bt_valid) > 3:
+            bt_diff = np.abs(np.diff(bt_valid))
+            bt_diff_normalized = bt_diff / (np.mean(bt_diff) + 1e-8)
+
+            # 对变化异常大的点降低权重
+            for i in range(len(bt_diff)):
+                if bt_diff_normalized[i] > 2.0:  # 变化超过平均值2倍
+                    weights[i] *= 0.5
+                    weights[i+1] *= 0.5
+
+        print(f"动态权重统计: 最小={np.min(weights):.2f}, 最大={np.max(weights):.2f}, 平均={np.mean(weights):.2f}")
+        return weights
+
+    def _estimate_dynamic_growth_rate(self, t_valid: np.array, bt_valid: np.array) -> float:
+        """基于数据动态估计增长率"""
+        if len(bt_valid) < 5:
+            return 0.0001
+
+        # 计算局部增长率
+        window_size = max(3, len(bt_valid) // 5)
+        local_growth_rates = []
+
+        for i in range(window_size, len(bt_valid) - window_size):
+            # 在窗口内拟合线性增长
+            window_t = t_valid[i-window_size:i+window_size]
+            window_bt = bt_valid[i-window_size:i+window_size]
+
+            if len(window_t) > 2:
+                # 计算局部斜率
+                dt = window_t[-1] - window_t[0]
+                dbt = window_bt[-1] - window_bt[0]
+                if dt > 0 and window_bt[0] > 0:
+                    local_rate = dbt / (dt * window_bt[0])
+                    if local_rate > 0:
+                        local_growth_rates.append(local_rate)
+
+        if local_growth_rates:
+            # 使用中位数作为稳健估计
+            k_estimate = np.median(local_growth_rates)
+            # 限制在合理范围内
+            k_estimate = np.clip(k_estimate, 0.000001, 0.1)
+            print(f"动态增长率估计: {k_estimate:.6f}")
+            return k_estimate
+        else:
+            return 0.0001
+
     def fit_model(self, time_data: np.array, breakthrough_ratio_data: np.array) -> bool:
         """
-        拟合Logistic模型 - 改进的拟合策略
+        拟合Logistic模型 - 使用动态权重和动态增长率
 
         参数:
             time_data: 时间数据（秒）
@@ -105,65 +203,91 @@ class LogisticWarningModel:
             t_valid = time_data[valid_mask]
             bt_valid = breakthrough_data[valid_mask]
 
-            # 改进的初始参数估计
-            A_init = min(0.95, np.max(bt_valid) * 1.1)  # 基于数据最大值估计
+            print(f"数据分析: 时间范围 {t_valid.min():.1f}-{t_valid.max():.1f}s, 穿透率范围 {bt_valid.min():.3f}-{bt_valid.max():.3f}")
 
-            # 估计增长率：使用数据的增长趋势
-            if len(bt_valid) > 3:
-                # 计算数据的平均增长率
-                time_diff = np.diff(t_valid)
-                bt_diff = np.diff(bt_valid)
-                growth_rates = bt_diff / (time_diff * bt_valid[:-1] + 1e-8)  # 避免除零
-                k_init = max(0.00001, np.median(growth_rates[growth_rates > 0]))
-            else:
-                k_init = 0.0001
+            # 动态参数估计
+            A_init = min(0.98, np.max(bt_valid) * 1.05)  # 基于数据最大值，更保守的估计
+            k_init = self._estimate_dynamic_growth_rate(t_valid, bt_valid)  # 动态增长率估计
 
-            # 估计拐点时间：寻找增长最快的点
+            # 改进的拐点估计
             if len(bt_valid) > 5:
-                # 计算二阶导数来找拐点
                 from scipy.ndimage import gaussian_filter1d
-                bt_smooth = gaussian_filter1d(bt_valid, sigma=1)
-                second_derivative = np.gradient(np.gradient(bt_smooth))
-                inflection_idx = np.argmax(np.abs(second_derivative))
-                t0_init = t_valid[inflection_idx]
+                bt_smooth = gaussian_filter1d(bt_valid, sigma=max(1, len(bt_valid)//15))
+                first_derivative = np.gradient(bt_smooth, t_valid)
+                # 找到增长率最大的点作为拐点
+                max_growth_idx = np.argmax(first_derivative)
+                t0_init = t_valid[max_growth_idx]
             else:
                 t0_init = np.median(t_valid)
 
-            print(f"初始参数估计: A={A_init:.3f}, k={k_init:.6f}, t0={t0_init:.1f}")
+            print(f"动态参数估计: A={A_init:.3f}, k={k_init:.6f}, t0={t0_init:.1f}")
 
-            # 创建权重：给早期和中期数据更高权重
-            weights = np.ones_like(bt_valid)
-            # 早期数据（前30%）权重加倍
-            early_mask = t_valid <= np.percentile(t_valid, 30)
-            weights[early_mask] *= 2.0
-            # 中期数据（30%-70%）权重增加50%
-            mid_mask = (t_valid > np.percentile(t_valid, 30)) & (t_valid <= np.percentile(t_valid, 70))
-            weights[mid_mask] *= 1.5
+            # 计算动态权重
+            weights = self._calculate_dynamic_weights(t_valid, bt_valid)
 
-            # 调整边界约束 - 更宽松的范围
-            lower_bounds = [max(0.1, np.max(bt_valid) * 0.8), 0.000001, 0]
-            upper_bounds = [1.0, 0.1, np.max(t_valid) * 2]
+            # 动态调整边界约束
+            A_max = min(1.0, np.max(bt_valid) * 1.2)
+            A_min = max(0.1, np.max(bt_valid) * 0.7)
+            k_max = max(0.01, k_init * 10)  # 基于估计值动态调整
+            k_min = max(0.000001, k_init * 0.1)
 
-            # 拟合 - 使用权重
-            self.params, _ = curve_fit(
-                self.logistic_function,
-                t_valid, bt_valid,
-                p0=[A_init, k_init, t0_init],
-                bounds=(lower_bounds, upper_bounds),
-                sigma=1/weights,  # 权重的倒数作为sigma
-                maxfev=5000
-            )
+            lower_bounds = [A_min, k_min, 0]
+            upper_bounds = [A_max, k_max, np.max(t_valid) * 2]
 
+            print(f"动态边界: A[{A_min:.3f}, {A_max:.3f}], k[{k_min:.6f}, {k_max:.6f}]")
+
+            # 多次拟合尝试，选择最佳结果
+            best_params = None
+            best_score = float('inf')
+
+            for attempt in range(3):
+                try:
+                    # 每次尝试稍微调整初始参数
+                    A_try = A_init * (0.9 + 0.2 * attempt / 2)
+                    k_try = k_init * (0.5 + attempt)
+                    t0_try = t0_init * (0.8 + 0.4 * attempt / 2)
+
+                    params, covariance = curve_fit(
+                        self.logistic_function,
+                        t_valid, bt_valid,
+                        p0=[A_try, k_try, t0_try],
+                        bounds=(lower_bounds, upper_bounds),
+                        sigma=1/weights,  # 动态权重
+                        maxfev=8000
+                    )
+
+                    # 计算拟合质量
+                    predicted = self.logistic_function(t_valid, *params)
+                    weighted_residuals = (bt_valid - predicted) * weights
+                    score = np.sum(weighted_residuals**2)
+
+                    if score < best_score:
+                        best_score = score
+                        best_params = params
+
+                except:
+                    continue
+
+            if best_params is None:
+                raise ValueError("所有拟合尝试都失败")
+
+            self.params = best_params
             self.fitted = True
 
-            # 计算关键时间点，传入实际数据用于饱和点检测
+            # 计算关键时间点
             self._calculate_key_timepoints(t_valid, bt_valid)
 
-            print(f"Logistic模型拟合成功: A={self.params[0]:.3f}, k={self.params[1]:.6f}, t0={self.params[2]:.1f}")
+            # 评估拟合质量
+            predicted = self.logistic_function(t_valid, *self.params)
+            r_squared = 1 - np.sum((bt_valid - predicted)**2) / np.sum((bt_valid - np.mean(bt_valid))**2)
+
+            print(f"动态Logistic模型拟合成功:")
+            print(f"  参数: A={self.params[0]:.3f}, k={self.params[1]:.6f}, t0={self.params[2]:.1f}")
+            print(f"  拟合质量 R²: {r_squared:.3f}")
             return True
 
         except Exception as e:
-            print(f"Logistic模型拟合失败: {e}")
+            print(f"动态Logistic模型拟合失败: {e}")
             import traceback
             traceback.print_exc()
             return False

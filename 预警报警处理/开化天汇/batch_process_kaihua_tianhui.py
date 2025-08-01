@@ -14,11 +14,11 @@ from pathlib import Path
 import traceback
 
 # 导入开化天汇预警系统
-from waste_incineration_warning_system_kaihua_tianhui import WasteIncinerationWarningSystemKaihuaTianhui
+from waste_incineration_warning_system_kaihua import WasteIncinerationWarningSystemKaihuaTianhui
 
 class BatchProcessorKaihuaTianhui:
     """开化天汇批量处理器"""
-    
+
     def __init__(self):
         self.warning_system = WasteIncinerationWarningSystemKaihuaTianhui()
         self.all_events = []  # 存储所有预警报警事件

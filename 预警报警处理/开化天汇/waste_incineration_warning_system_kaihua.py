@@ -109,7 +109,73 @@ class WasteIncinerationWarningSystemKaihuaTianhui:
         series_numeric = series_numeric.replace([np.inf, -np.inf], np.nan)
         
         return series_numeric
-    
+
+    def remove_pollutant_outliers_boxplot(self, series: pd.Series, pollutant_name: str) -> pd.Series:
+        """
+        使用箱型图方法去除污染物浓度中的异常值（极大值和极小值）
+
+        箱型图异常值检测原理：
+        - Q1: 第一四分位数（25%分位数）
+        - Q3: 第三四分位数（75%分位数）
+        - IQR: 四分位距 = Q3 - Q1
+        - 下边界: Q1 - 1.5 * IQR
+        - 上边界: Q3 + 1.5 * IQR
+        - 超出边界的值被认为是异常值
+
+        参数:
+            series: 污染物浓度数据序列
+            pollutant_name: 污染物名称（用于日志输出）
+
+        返回:
+            去除异常值后的数据序列（异常值用NaN替换）
+        """
+        if series.empty or series.isna().all():
+            return series
+
+        # 去除NaN值和零值进行计算（污染物浓度为0通常不是有效数据）
+        valid_data = series[(series.notna()) & (series > 0)]
+
+        if len(valid_data) < 4:  # 数据点太少，无法进行箱型图分析
+            print(f"{pollutant_name}有效数据点不足，跳过异常值检测")
+            return series
+
+        # 计算四分位数
+        Q1 = valid_data.quantile(0.25)
+        Q3 = valid_data.quantile(0.75)
+        IQR = Q3 - Q1
+
+        # 计算异常值边界
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+
+        # 对于污染物浓度，下边界不应小于0
+        lower_bound = max(0, lower_bound)
+
+        # 识别异常值
+        outliers_mask = (series < lower_bound) | (series > upper_bound)
+        outliers_count = outliers_mask.sum()
+
+        if outliers_count > 0:
+            print(f"{pollutant_name}浓度异常值检测:")
+            print(f"  有效数据范围: [{valid_data.min():.2f}, {valid_data.max():.2f}]")
+            print(f"  正常范围: [{lower_bound:.2f}, {upper_bound:.2f}]")
+            print(f"  检测到异常值: {outliers_count} 个")
+
+            # 将异常值替换为NaN
+            cleaned_series = series.copy()
+            cleaned_series[outliers_mask] = np.nan
+
+            # 统计信息
+            remaining_valid = cleaned_series[(cleaned_series.notna()) & (cleaned_series > 0)]
+            if len(remaining_valid) > 0:
+                print(f"  清理后数据范围: [{remaining_valid.min():.2f}, {remaining_valid.max():.2f}]")
+                print(f"  保留有效数据: {len(remaining_valid)} 个")
+
+            return cleaned_series
+        else:
+            print(f"{pollutant_name}浓度未检测到异常值")
+            return series
+
     def load_data(self, file_path: str) -> pd.DataFrame:
         """加载数据文件"""
         try:
@@ -130,7 +196,23 @@ class WasteIncinerationWarningSystemKaihuaTianhui:
             for col in numeric_columns:
                 if col in df.columns:
                     df[col] = self.clean_numeric_data(df[col])
-            
+
+            # 特殊处理：使用箱型图去除污染物浓度异常值
+            pollutants_to_clean = {
+                'dust': 'PM（颗粒物）',
+                'so2': 'SO2（二氧化硫）',
+                'nox': 'NOx（氮氧化物）',
+                'co': 'CO（一氧化碳）',
+                'hcl': 'HCL（氯化氢）'
+            }
+
+            print(f"\n开始污染物浓度异常值检测...")
+            for pollutant_key, pollutant_display_name in pollutants_to_clean.items():
+                field_name = self.field_mapping.get(pollutant_key)
+                if field_name and field_name in df.columns:
+                    print(f"\n对{pollutant_display_name}浓度字段 '{field_name}' 进行异常值检测...")
+                    df[field_name] = self.remove_pollutant_outliers_boxplot(df[field_name], pollutant_display_name)
+
             print(f"成功加载数据: {len(df)} 行, {len(df.columns)} 列")
             return df
             
