@@ -1210,30 +1210,8 @@ class AdsorptionCurveProcessor:
         if base_datetime is None:
             base_datetime = datetime(2024, 7, 30, 0, 0, 0)  # 默认基准时间
 
-        # 计算累积时间段时长（新的时间计算方式）
-        def calculate_cumulative_segment_time(data):
-            """计算累积的时间段时长"""
-            cumulative_hours = []
-            total_duration = 0
-
-            for i in range(len(data)):
-                if i == 0:
-                    # 第一个数据点，假设时间段长度为下一个点的时间间隔
-                    if len(data) > 1:
-                        segment_duration = data.iloc[1]['time'] - data.iloc[0]['time']
-                    else:
-                        segment_duration = 1800  # 默认30分钟
-                else:
-                    # 计算当前点与前一个点的时间间隔作为当前时间段长度
-                    segment_duration = data.iloc[i]['time'] - data.iloc[i-1]['time']
-
-                total_duration += segment_duration
-                cumulative_hours.append(total_duration / 3600)  # 转换为小时
-
-            return cumulative_hours
-
-        # 使用新的时间计算方式
-        time_hours = calculate_cumulative_segment_time(efficiency_data)
+        # 绘制实际穿透率数据点（蓝色线条，类似原图）
+        time_hours = efficiency_data['time'] / 3600  # 转换为小时
         breakthrough_percent = efficiency_data['breakthrough_ratio'] * 100  # 转换为百分比
 
         ax1.plot(time_hours, breakthrough_percent, 'b-', linewidth=1.5,
@@ -1245,88 +1223,76 @@ class AdsorptionCurveProcessor:
                                    edgecolors='darkblue', linewidth=0.5,
                                    label='时间段穿透率数据点')
 
-        # 为散点图添加交互式标注功能（点击展示）
-        def on_click(event):
-            """鼠标点击时显示数据点信息"""
-            if event.inaxes == ax1 and event.button == 1:  # 左键点击
+        # 为散点图添加交互式标注功能
+        def on_hover(event):
+            """鼠标悬停时显示数据点信息"""
+            if event.inaxes == ax1:
                 # 检查鼠标是否在散点附近
-                min_distance = float('inf')
-                closest_index = -1
-
                 for i, (time_h, bt_pct) in enumerate(zip(time_hours, breakthrough_percent)):
                     # 计算鼠标位置与数据点的距离
-                    distance = ((event.xdata - time_h) ** 2 + (event.ydata - bt_pct) ** 2) ** 0.5
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_index = i
+                    if (abs(event.xdata - time_h) < 0.5 and
+                        abs(event.ydata - bt_pct) < 2.0):
 
-                # 如果点击位置距离最近的数据点足够近，显示信息
-                if closest_index >= 0 and min_distance < 2.0:  # 增加点击容忍度
-                    i = closest_index
-                    time_h = time_hours[i]
-                    bt_pct = breakthrough_percent[i]
+                        # 清除之前的标注
+                        for annotation in getattr(ax1, '_hover_annotations', []):
+                            annotation.remove()
+                        ax1._hover_annotations = []
 
-                    # 清除之前的标注
-                    for annotation in getattr(ax1, '_click_annotations', []):
-                        annotation.remove()
-                    ax1._click_annotations = []
+                        # 创建新的标注 - 按照清洗后图像的格式
+                        time_seconds = efficiency_data.iloc[i]['time']
 
-                    # 创建新的标注 - 按照清洗后图像的格式
-                    time_seconds = efficiency_data.iloc[i]['time']
+                        # 计算实际时间段
+                        current_time = base_datetime + timedelta(seconds=time_seconds)
 
-                    # 计算实际时间段的开始时间
-                    start_time = base_datetime + timedelta(seconds=time_seconds)
+                        # 计算时间段长度（基于相邻数据点的时间间隔）
+                        if i < len(efficiency_data) - 1:
+                            next_time_seconds = efficiency_data.iloc[i + 1]['time']
+                            segment_duration = next_time_seconds - time_seconds
+                        elif i > 0:
+                            prev_time_seconds = efficiency_data.iloc[i - 1]['time']
+                            segment_duration = time_seconds - prev_time_seconds
+                        else:
+                            segment_duration = 1800  # 默认30分钟
 
-                    # 计算时间段长度（基于相邻数据点的时间间隔）
-                    if i < len(efficiency_data) - 1:
-                        next_time_seconds = efficiency_data.iloc[i + 1]['time']
-                        segment_duration = next_time_seconds - time_seconds
-                    elif i > 0:
-                        prev_time_seconds = efficiency_data.iloc[i - 1]['time']
-                        segment_duration = time_seconds - prev_time_seconds
-                    else:
-                        segment_duration = 1800  # 默认30分钟
+                        # 计算时间段的开始和结束时间
+                        start_time = current_time
+                        end_time = current_time + timedelta(seconds=segment_duration)
 
-                    # 计算时间段的结束时间
-                    end_time = start_time + timedelta(seconds=segment_duration)
+                        # 格式化时间段显示（模仿图像中的格式）
+                        date_str = start_time.strftime("%m-%d")
+                        start_time_str = start_time.strftime("%H:%M")
+                        end_time_str = end_time.strftime("%H:%M")
+                        time_segment = f"{date_str} {start_time_str}-{end_time_str}"
 
-                    # 格式化时间段显示（模仿图像中的格式）
-                    date_str = start_time.strftime("%m-%d")
-                    start_time_str = start_time.strftime("%H:%M")
-                    end_time_str = end_time.strftime("%H:%M")
-                    time_segment = f"{date_str} {start_time_str}-{end_time_str}"
+                        # 创建标注文本（模仿清洗后图像的格式）
+                        annotation_text = f"时间段: {time_segment}\n穿透率: {bt_pct:.1f}%"
 
-                    # 计算累积时间段长度（小时）
-                    cumulative_hours = time_h
+                        annotation = ax1.annotate(
+                            annotation_text,
+                            xy=(time_h, bt_pct),
+                            xytext=(20, 20), textcoords='offset points',
+                            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue',
+                                    alpha=0.9, edgecolor='blue', linewidth=1),
+                            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1',
+                                          color='blue', alpha=0.8, linewidth=1.5),
+                            fontsize=10, ha='left', va='bottom',
+                            zorder=15, fontweight='normal'
+                        )
 
-                    # 创建标注文本（模仿清洗后图像的格式，并显示累积时间）
-                    annotation_text = f"时间段: {time_segment}\n累积时长: {cumulative_hours:.2f}小时\n穿透率: {bt_pct:.1f}%"
-
-                    annotation = ax1.annotate(
-                        annotation_text,
-                        xy=(time_h, bt_pct),
-                        xytext=(20, 20), textcoords='offset points',
-                        bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue',
-                                alpha=0.9, edgecolor='blue', linewidth=1),
-                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.1',
-                                      color='blue', alpha=0.8, linewidth=1.5),
-                        fontsize=10, ha='left', va='bottom',
-                        zorder=15, fontweight='normal'
-                    )
-
-                    if not hasattr(ax1, '_click_annotations'):
-                        ax1._click_annotations = []
-                    ax1._click_annotations.append(annotation)
-                    fig.canvas.draw_idle()
+                        if not hasattr(ax1, '_hover_annotations'):
+                            ax1._hover_annotations = []
+                        ax1._hover_annotations.append(annotation)
+                        fig.canvas.draw_idle()
+                        break
                 else:
-                    # 如果点击位置不在数据点附近，清除标注
-                    for annotation in getattr(ax1, '_click_annotations', []):
+                    # 如果鼠标不在任何数据点附近，清除标注
+                    for annotation in getattr(ax1, '_hover_annotations', []):
                         annotation.remove()
-                    ax1._click_annotations = []
+                    ax1._hover_annotations = []
                     fig.canvas.draw_idle()
 
-        # 连接鼠标点击事件
-        fig.canvas.mpl_connect('button_press_event', on_click)
+        # 连接鼠标移动事件
+        fig.canvas.mpl_connect('motion_notify_event', on_hover)
 
         # 在数据点上添加红色圆点和黄色标签（类似原图，但减少显示频率）
         for i, (time_h, bt_pct) in enumerate(zip(time_hours, breakthrough_percent)):
@@ -1342,8 +1308,7 @@ class AdsorptionCurveProcessor:
 
         # 如果有Logistic模型拟合结果，绘制预测曲线
         if self.warning_model.fitted:
-            # 注意：预测曲线仍然基于原始时间计算，因为模型是基于原始时间训练的
-            # 但显示时需要转换为累积时间段格式
+            # 扩展时间范围以显示预测
             max_time = efficiency_data['time'].max()
             if self.warning_model.predicted_saturation_time:
                 extend_time = max(max_time * 1.3, self.warning_model.predicted_saturation_time * 1.1)
@@ -1352,20 +1317,10 @@ class AdsorptionCurveProcessor:
 
             time_smooth = np.linspace(efficiency_data['time'].min(), extend_time, 500)
             bt_smooth = self.warning_model.predict_breakthrough(time_smooth)
-
-            # 将预测时间转换为累积时间段格式
-            # 这里需要根据原始数据的时间间隔来估算累积时间
-            avg_interval = np.mean(np.diff(efficiency_data['time']))  # 平均时间间隔
-            cumulative_smooth_hours = []
-            for t in time_smooth:
-                # 估算到时间t为止的累积时间段数
-                num_segments = (t - efficiency_data['time'].min()) / avg_interval
-                cumulative_time = num_segments * avg_interval / 3600  # 转换为小时
-                cumulative_smooth_hours.append(cumulative_time)
-
+            time_smooth_hours = time_smooth / 3600
             bt_smooth_percent = bt_smooth * 100
 
-            ax1.plot(cumulative_smooth_hours, bt_smooth_percent, 'g--', linewidth=2,
+            ax1.plot(time_smooth_hours, bt_smooth_percent, 'g--', linewidth=2,
                     alpha=0.8, label='Logistic预测曲线')
 
             # 添加关键阈值线
@@ -1378,23 +1333,14 @@ class AdsorptionCurveProcessor:
                        color='red', linestyle='--', alpha=0.7,
                        label=f'预测饱和阈值({self.warning_model.saturation_threshold:.1%})')
 
-            # 标记关键时间点（转换为累积时间段格式）
-            def convert_to_cumulative_time(original_time):
-                """将原始时间转换为累积时间段格式"""
-                if original_time <= efficiency_data['time'].min():
-                    return 0
-                # 估算到该时间点的累积时间段数
-                avg_interval = np.mean(np.diff(efficiency_data['time']))
-                num_segments = (original_time - efficiency_data['time'].min()) / avg_interval
-                return num_segments * avg_interval / 3600  # 转换为小时
-
+            # 标记关键时间点
             if self.warning_model.breakthrough_start_time:
-                start_time_h = convert_to_cumulative_time(self.warning_model.breakthrough_start_time)
+                start_time_h = self.warning_model.breakthrough_start_time / 3600
                 ax1.axvline(x=start_time_h, color='green', linestyle=':', alpha=0.8,
                            label='穿透起始时间')
 
             if self.warning_model.warning_time:
-                warning_time_h = convert_to_cumulative_time(self.warning_model.warning_time)
+                warning_time_h = self.warning_model.warning_time / 3600
                 ax1.axvline(x=warning_time_h, color='orange', linestyle=':', alpha=0.8,
                            label='预警时间点(80%)')
 
@@ -1407,13 +1353,13 @@ class AdsorptionCurveProcessor:
                            label=f'预警点(穿透率:{warning_breakthrough:.1f}%)')
 
             if self.warning_model.predicted_saturation_time:
-                sat_time_h = convert_to_cumulative_time(self.warning_model.predicted_saturation_time)
+                sat_time_h = self.warning_model.predicted_saturation_time / 3600
                 ax1.axvline(x=sat_time_h, color='red', linestyle=':', alpha=0.8,
                            label='实际饱和时间')
 
-        ax1.set_xlabel('累积运行时间 (小时)', fontsize=12)
+        ax1.set_xlabel('时间 (小时)', fontsize=12)
         ax1.set_ylabel('穿透率 (%)', fontsize=12)
-        ax1.set_title('穿透率变化趋势与预警分析 (基于累积时间段)', fontsize=14, fontweight='bold')
+        ax1.set_title('穿透率变化趋势与预警分析', fontsize=14, fontweight='bold')
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         ax1.set_ylim(0, 105)  # 设置y轴范围
