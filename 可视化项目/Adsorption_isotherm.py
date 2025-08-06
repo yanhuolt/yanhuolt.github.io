@@ -484,57 +484,200 @@ class AdsorptionCurveProcessor:
                 print("提示: Excel文件需要安装openpyxl或xlrd库")
                 print("安装命令: pip install openpyxl xlrd")
             return False
-    
+
+    def identify_data_type(self, data: pd.DataFrame) -> str:
+        """识别数据类型"""
+        if '进口0出口1' not in data.columns:
+            return 'unknown'
+
+        value_counts = data['进口0出口1'].value_counts()
+        total_count = len(data)
+
+        print(f"\n=== 数据类型识别 ===")
+        for value, count in value_counts.items():
+            percentage = (count / total_count) * 100
+            print(f"  进口0出口1={value}: {count} 条 ({percentage:.1f}%)")
+
+        if 2 in value_counts.index and value_counts[2] / total_count > 0.8:
+            print("✅ 识别为同时记录型数据 (每条记录同时包含进出口浓度)")
+            return 'simultaneous'
+        elif set(value_counts.index).issubset({0, 1}):
+            print("✅ 识别为切换型数据 (进出口数据分别记录)")
+            return 'switching'
+        else:
+            print("✅ 识别为混合型数据")
+            return 'mixed'
+
     def basic_data_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
-        """基础数据清洗"""
+        """基础数据清洗 - 根据进口0出口1列值自适应处理"""
         print("\n=== 基础数据清洗 ===")
         original_count = len(data)
-        
-        # 1. 获取工作状态数据（风速值大于0.5）
-        data = data[data['风管内风速值'] > 0.5].copy()
-        print(f"1. 保留风速>0.5的数据: {len(data)} 条 (剔除 {original_count - len(data)} 条)")
-        
-        # 2. 根据进口0出口1列分别剔除0值
-        before_zero_removal = len(data)
-        # 当进口0出口1=0时，剔除进口voc为0的记录
-        # 当进口0出口1=1时，剔除出口voc为0的记录
-        inlet_mask = (data['进口0出口1'] == 0) & (data['进口voc'] > 0)
-        outlet_mask = (data['进口0出口1'] == 1) & (data['出口voc'] > 0)
-        data = data[inlet_mask | outlet_mask].copy()
-        print(f"2. 根据进口0出口1列分别剔除相应VOC为0的数据: {len(data)} 条 (剔除 {before_zero_removal - len(data)} 条)")
-        
-        # 3. 剔除风量=0的数据
+
+        # 识别数据类型
+        data_type = self.identify_data_type(data)
+
+        # 1. 剔除风速<0.5的记录（所有类型通用）
+        data = data[data['风管内风速值'] >= 0.5].copy()
+        print(f"1. 剔除风速<0.5的记录: {len(data)} 条 (剔除 {original_count - len(data)} 条)")
+
+        # 2. 剔除风量=0的数据（所有类型通用）
         before_flow_removal = len(data)
         data = data[data['风量'] > 0].copy()
-        print(f"3. 剔除风量=0的数据: {len(data)} 条 (剔除 {before_flow_removal - len(data)} 条)")
+        print(f"2. 剔除风量=0的数据: {len(data)} 条 (剔除 {before_flow_removal - len(data)} 条)")
 
-        # 4. 剔除出口浓度大于等于进口浓度的记录
-        before_concentration_removal = len(data)
-        data = self._remove_invalid_concentration_pairs(data)
-        print(f"4. 剔除出口浓度≥进口浓度的记录: {len(data)} 条 (剔除 {before_concentration_removal - len(data)} 条)")
+        # 3. 根据进口0出口1列值选择不同的清洗方式
+        if data_type == 'simultaneous':
+            # 进口0出口1=2：同时记录型数据清洗
+            data = self._clean_simultaneous_records(data)
 
+        elif data_type == 'switching':
+            # 进口0出口1=0或1：切换型数据清洗
+            data = self._clean_switching_records(data)
+
+        else:  # mixed
+            # 混合型：分别处理不同类型的记录
+            data = self._clean_mixed_records(data)
+
+        print(f"基础清洗完成: {len(data)} 条记录")
         return data
 
-    def _remove_invalid_concentration_pairs(self, data: pd.DataFrame) -> pd.DataFrame:
-        """剔除出口浓度大于等于进口浓度的记录"""
-        print("   正在检查进出口浓度配对...")
+    def _clean_simultaneous_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """清洗同时记录型数据（进口0出口1=2）"""
+        print("3. 处理同时记录型数据 (进口0出口1=2):")
 
-        # 分离进口和出口数据
-        inlet_data = data[data['进口0出口1'] == 0].copy()
-        outlet_data = data[data['进口0出口1'] == 1].copy()
+        simultaneous_data = data[data['进口0出口1'] == 2].copy()
+        other_data = data[data['进口0出口1'] != 2].copy()
 
-        if len(inlet_data) == 0 or len(outlet_data) == 0:
-            print("   警告: 缺少进口或出口数据，跳过浓度配对检查")
+        if len(simultaneous_data) == 0:
+            print("   未找到同时记录数据")
             return data
 
+        original_count = len(simultaneous_data)
+
+        # 3.1 去除进口浓度和出口浓度存在0值的记录
+        before_zero_removal = len(simultaneous_data)
+        simultaneous_data = simultaneous_data[
+            (simultaneous_data['进口voc'] > 0) &
+            (simultaneous_data['出口voc'] > 0)
+        ].copy()
+        print(f"   3.1 去除进口或出口浓度为0的记录: {len(simultaneous_data)} 条 (剔除 {before_zero_removal - len(simultaneous_data)} 条)")
+
+        # 3.2 去除出口浓度大于进口浓度的记录
+        before_logic_removal = len(simultaneous_data)
+        simultaneous_data = simultaneous_data[
+            simultaneous_data['进口voc'] >= simultaneous_data['出口voc']
+        ].copy()
+        print(f"   3.2 去除出口浓度>进口浓度的记录: {len(simultaneous_data)} 条 (剔除 {before_logic_removal - len(simultaneous_data)} 条)")
+
+        # 3.3 计算穿透率和处理效率
+        if len(simultaneous_data) > 0:
+            simultaneous_data['穿透率'] = simultaneous_data['出口voc'] / simultaneous_data['进口voc']
+            simultaneous_data['处理效率'] = (1 - simultaneous_data['穿透率']) * 100
+            print(f"   3.3 计算穿透率和效率完成，平均效率: {simultaneous_data['处理效率'].mean():.2f}%")
+
+        # 合并数据
+        if len(other_data) > 0:
+            result_data = pd.concat([simultaneous_data, other_data], ignore_index=True)
+        else:
+            result_data = simultaneous_data
+
+        result_data = result_data.sort_values('创建时间').reset_index(drop=True)
+        print(f"   同时记录型数据清洗完成: {original_count} → {len(simultaneous_data)} 条")
+
+        return result_data
+
+    def _clean_switching_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """清洗切换型数据（进口0出口1=0或1）"""
+        print("3. 处理切换型数据 (进口0出口1=0或1):")
+
+        inlet_data = data[data['进口0出口1'] == 0].copy()
+        outlet_data = data[data['进口0出口1'] == 1].copy()
+        other_data = data[~data['进口0出口1'].isin([0, 1])].copy()
+
+        print(f"   进口数据: {len(inlet_data)} 条")
+        print(f"   出口数据: {len(outlet_data)} 条")
+
+        # 3.1 根据进口0出口1列值分别去除相应浓度为0的记录
+        before_inlet_removal = len(inlet_data)
+        inlet_data = inlet_data[inlet_data['进口voc'] > 0].copy()
+        print(f"   3.1 去除进口浓度为0的记录: {len(inlet_data)} 条 (剔除 {before_inlet_removal - len(inlet_data)} 条)")
+
+        before_outlet_removal = len(outlet_data)
+        outlet_data = outlet_data[outlet_data['出口voc'] > 0].copy()
+        print(f"   3.1 去除出口浓度为0的记录: {len(outlet_data)} 条 (剔除 {before_outlet_removal - len(outlet_data)} 条)")
+
+        # 3.2 通过时间匹配去除出口>进口的记录
+        if len(inlet_data) > 0 and len(outlet_data) > 0:
+            matched_data = self._match_switching_data(inlet_data, outlet_data)
+        else:
+            print("   警告: 缺少进口或出口数据，跳过时间匹配")
+            matched_data = pd.concat([inlet_data, outlet_data], ignore_index=True)
+
+        # 合并数据
+        if len(other_data) > 0:
+            result_data = pd.concat([matched_data, other_data], ignore_index=True)
+        else:
+            result_data = matched_data
+
+        result_data = result_data.sort_values('创建时间').reset_index(drop=True)
+        print(f"   切换型数据清洗完成: {len(result_data)} 条")
+
+        return result_data
+
+    def _clean_mixed_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """清洗混合型数据"""
+        print("3. 处理混合型数据:")
+
+        # 分别处理不同类型的数据
+        simultaneous_data = data[data['进口0出口1'] == 2].copy()
+        switching_data = data[data['进口0出口1'].isin([0, 1])].copy()
+        other_data = data[~data['进口0出口1'].isin([0, 1, 2])].copy()
+
+        print(f"   同时记录数据: {len(simultaneous_data)} 条")
+        print(f"   切换数据: {len(switching_data)} 条")
+        print(f"   其他数据: {len(other_data)} 条")
+
+        cleaned_parts = []
+
+        # 处理同时记录数据
+        if len(simultaneous_data) > 0:
+            cleaned_simultaneous = self._clean_simultaneous_records(simultaneous_data)
+            cleaned_parts.append(cleaned_simultaneous[cleaned_simultaneous['进口0出口1'] == 2])
+
+        # 处理切换数据
+        if len(switching_data) > 0:
+            cleaned_switching = self._clean_switching_records(switching_data)
+            cleaned_parts.append(cleaned_switching[cleaned_switching['进口0出口1'].isin([0, 1])])
+
+        # 添加其他数据
+        if len(other_data) > 0:
+            cleaned_parts.append(other_data)
+
+        # 合并所有清洗后的数据
+        if cleaned_parts:
+            result_data = pd.concat(cleaned_parts, ignore_index=True)
+            result_data = result_data.sort_values('创建时间').reset_index(drop=True)
+        else:
+            result_data = pd.DataFrame()
+
+        print(f"   混合型数据清洗完成: {len(result_data)} 条")
+        return result_data
+
+    def _match_switching_data(self, inlet_data: pd.DataFrame, outlet_data: pd.DataFrame) -> pd.DataFrame:
+        """匹配切换型数据的进口和出口记录"""
+        print("   3.2 通过时间匹配去除出口>进口的记录:")
+
+        if len(inlet_data) == 0 or len(outlet_data) == 0:
+            print("      警告: 缺少进口或出口数据，跳过时间匹配")
+            return pd.concat([inlet_data, outlet_data], ignore_index=True)
+
         # 按时间排序
-        inlet_data = inlet_data.sort_values('创建时间')
-        outlet_data = outlet_data.sort_values('创建时间')
+        inlet_data = inlet_data.sort_values('创建时间').reset_index(drop=True)
+        outlet_data = outlet_data.sort_values('创建时间').reset_index(drop=True)
 
         # 使用时间窗口匹配进出口数据
         valid_records = []
         time_window = pd.Timedelta(minutes=30)  # 30分钟时间窗口
-
         removed_count = 0
 
         # 检查每个进口记录
@@ -557,7 +700,6 @@ class AdsorptionCurveProcessor:
                 # 检查浓度关系：只保留进口浓度 >= 出口浓度的记录
                 if inlet_voc >= outlet_voc:
                     valid_records.append(inlet_record)
-                    # 同时保留对应的出口记录
                     valid_records.append(closest_outlet)
                 else:
                     removed_count += 2  # 进口和出口记录都被剔除
@@ -571,7 +713,8 @@ class AdsorptionCurveProcessor:
 
             # 检查是否已经在valid_records中
             already_included = any(
-                record['创建时间'] == outlet_time and record['进口0出口1'] == 1
+                abs((pd.to_datetime(record['创建时间']) - outlet_time).total_seconds()) < 1
+                and record['进口0出口1'] == 1
                 for record in valid_records
             )
 
@@ -587,13 +730,18 @@ class AdsorptionCurveProcessor:
                     valid_records.append(outlet_record)
 
         if valid_records:
-            result_data = pd.DataFrame(valid_records).drop_duplicates()
-            print(f"   浓度配对检查完成，剔除了 {removed_count} 条记录")
-            print(f"   剔除原因：出口浓度 ≥ 进口浓度")
+            result_data = pd.DataFrame(valid_records).drop_duplicates().reset_index(drop=True)
+            result_data = result_data.sort_values('创建时间').reset_index(drop=True)
+            print(f"      切换数据匹配: 保留 {len(result_data)} 条，移除 {removed_count} 条异常记录")
             return result_data
         else:
-            print("   警告: 浓度配对检查后无有效数据")
+            print("      警告: 时间匹配后无有效数据")
             return pd.DataFrame()
+
+    def _remove_invalid_concentration_pairs(self, data: pd.DataFrame) -> pd.DataFrame:
+        """剔除出口浓度大于等于进口浓度的记录 - 已废弃，由新的清洗方法替代"""
+        print("   警告: 使用了已废弃的方法，请使用新的数据类型特定清洗方法")
+        return data
 
     def ks_test_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
         """K-S检验数据清洗"""

@@ -8,14 +8,11 @@ warnings.filterwarnings('ignore')
 
 # 建德数据字段映射 (基于实际CSV文件的列名)
 JIANDE_FIELD_MAPPING = {
-    # 炉膛温度相关字段 (9个测点) - 对应规则中的I+J+K+L+M+N+O+P+Q)/9
     "furnace_temp_points": [
         "上部烟气温度左", "上部烟气温度中", "上部烟气温度右",  # 上部断面
         "中部烟气温度左", "中部烟气温度中", "中部烟气温度右",  # 中部断面
         "下部烟气温度左", "下部烟气温度中", "下部烟气温度右"   # 下部断面
     ],
-
-    # 根据实际数据列名映射
     "furnace_temp_1": "上部烟气温度左",
     "furnace_temp_2": "上部烟气温度中",
     "furnace_temp_3": "上部烟气温度右",
@@ -25,51 +22,39 @@ JIANDE_FIELD_MAPPING = {
     "furnace_temp_7": "下部烟气温度左",
     "furnace_temp_8": "下部烟气温度中",
     "furnace_temp_9": "下部烟气温度右",
-
-    # 布袋除尘器压差 - 对应规则中的AO列
     "bag_pressure": "除尘器差压",
-
-    # 氧含量 - 对应规则中的AT列
     "o2": "烟气氧量",
-
-    # 污染物浓度字段 - 对应规则中的各列，需要进行折算
-    "dust": "烟气烟尘",      # AU列 - 颗粒物（实测值，需折算）
-    "so2": "SO2浓度",       # AV列 - 二氧化硫（实测值，需折算）
-    "nox": "NOX浓度",       # AW列 - 氮氧化物（实测值，需折算）
-    "co": "CO浓度",         # AX列 - 一氧化碳（实测值，需折算）
-    "hcl": "HCL浓度",       # AY列 - 氯化氢（实测值，需折算）
+    "dust": "烟气烟尘",
+    "so2": "SO2浓度",
+    "nox": "NOX浓度",
+    "co": "CO浓度",
+    "hcl": "HCL浓度",
 }
 
 # 建德预警报警阈值配置 (根据新规则)
 JIANDE_WARNING_THRESHOLDS = {
-    # 预警阈值
-    "low_furnace_temp": 850,      # 瞬时低炉温焚烧 <850℃
-    "high_furnace_temp": 1200,    # 炉膛温度偏高 >1200℃
-    "very_high_furnace_temp": 1300, # 炉膛温度过高 >1300℃
-    "bag_pressure_high": 2000,    # 布袋除尘器压力损失偏高 >2000Pa
-    "bag_pressure_low": 500,      # 布袋除尘器压力损失偏低 <500Pa
-    "o2_high": 10,                # 焚烧炉出口氧含量偏高 >10%
-    "o2_low": 6,                  # 焚烧炉出口氧含量偏低 <6%
-
-    # 污染物浓度预警阈值（小时均值，折算后）
-    "dust_warning_limit": 30,     # 颗粒物（PM）预警 >30mg/m³
-    "nox_warning_limit": 300,     # 氮氧化物（NOx）预警 >300mg/m³
-    "so2_warning_limit": 100,     # 二氧化硫（SO₂）预警 >100mg/m³
-    "hcl_warning_limit": 60,      # 氯化氢（HCl）预警 >60mg/m³
-    "co_warning_limit": 100,      # 一氧化碳（CO）预警 >100mg/m³
+    "low_furnace_temp": 850,
+    "high_furnace_temp": 1200,
+    "very_high_furnace_temp": 1300,
+    "bag_pressure_high": 2000,
+    "bag_pressure_low": 500,
+    "o2_high": 10,
+    "o2_low": 6,
+    "dust_warning_limit": 30,
+    "nox_warning_limit": 300,
+    "so2_warning_limit": 100,
+    "hcl_warning_limit": 60,
+    "co_warning_limit": 100,
 }
 
 # 建德报警阈值配置
 JIANDE_ALARM_THRESHOLDS = {
-    # 温度报警阈值
-    "low_furnace_temp": 850,      # 低炉温焚烧 <850℃
-
-    # 污染物浓度报警阈值（日均值，折算后）
-    "dust_alarm_limit": 20,       # 颗粒物（PM）报警 >20mg/m³
-    "nox_alarm_limit": 250,       # 氮氧化物（NOx）报警 >250mg/m³
-    "so2_alarm_limit": 80,        # 二氧化硫（SO₂）报警 >80mg/m³
-    "hcl_alarm_limit": 50,        # 氯化氢（HCl）报警 >50mg/m³
-    "co_alarm_limit": 80,         # 一氧化碳（CO）报警 >80mg/m³
+    "low_furnace_temp": 850,
+    "dust_alarm_limit": 20,
+    "nox_alarm_limit": 250,
+    "so2_alarm_limit": 80,
+    "hcl_alarm_limit": 50,
+    "co_alarm_limit": 80,
 }
 
 class WasteIncinerationWarningSystemJiande:
@@ -131,7 +116,6 @@ class WasteIncinerationWarningSystemJiande:
                 df_clean[col] = df_clean[col].replace('nan', '0')
 
                 # 处理连续数字的情况（如 '465.96645.97657.15'）
-                # 取第一个有效数字
                 df_clean[col] = df_clean[col].str.extract(r'(-?\d+\.?\d*)', expand=False)
 
                 # 转换为数值，无法转换的设为NaN
@@ -140,13 +124,15 @@ class WasteIncinerationWarningSystemJiande:
                 # 填充NaN值为0
                 df_clean[col] = df_clean[col].fillna(0)
 
+        # 过滤掉含有0值的记录
+        zero_mask = (df_clean[numeric_columns] == 0).any(axis=1)
+        df_clean = df_clean[~zero_mask]
+
         return df_clean
 
     def calculate_furnace_temperature(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         计算炉膛温度 (建德单炉，9个温度测点)
-        根据预警规则：对焚烧炉炉膛的中部和上部两个断面，各自取所有热电偶测量温度的中位数
-        计算这两个中位数的算术平均值，作为该断面的代表温度
         """
         result_df = df.copy()
 
@@ -166,14 +152,16 @@ class WasteIncinerationWarningSystemJiande:
             # 计算两个中位数的算术平均值，作为该断面的代表温度
             result_df['furnace_temp'] = (upper_median + middle_median) / 2
 
-            print(f"✅ 使用上部断面({len(upper_cols)}个测点)和中部断面({len(middle_cols)}个测点)计算炉膛温度")
         elif len(available_temp_cols) > 0:
             # 如果测点不足，使用所有可用测点的平均值
             result_df['furnace_temp'] = df[available_temp_cols].mean(axis=1)
-            print(f"⚠️ 温度测点不足，使用 {len(available_temp_cols)} 个测点的平均值")
+
         else:
             print("❌ 未找到温度数据列")
             result_df['furnace_temp'] = 0
+
+        # 过滤掉含有0值的记录
+        result_df = result_df[result_df['furnace_temp'] != 0]
 
         return result_df
 
@@ -269,6 +257,9 @@ class WasteIncinerationWarningSystemJiande:
         # 按日期分组计算日均值
         df_daily = self.calculate_time_windows(df, '1day')
 
+        # 过滤掉含有0值的记录
+        df_daily = df_daily[(df_daily != 0).all(axis=1)]
+
         # 检查各种污染物日均值（需要进行折算）
         pollutants = {
             'dust': ('烟气中颗粒物（PM）排放超标', 'dust_alarm_limit'),
@@ -301,6 +292,9 @@ class WasteIncinerationWarningSystemJiande:
                     if min_len > 0:
                         # 折算公式：ρ（标准）=ρ（实测）*10/(21-ρ（实测O2））
                         corrected_conc = measured_conc.iloc[:min_len] * 10 / (21 - measured_o2.iloc[:min_len])
+
+                        # 过滤掉含有0值的记录
+                        corrected_conc = corrected_conc[corrected_conc != 0]
 
                         # 检查是否超过阈值
                         exceed_mask = corrected_conc > threshold
@@ -628,8 +622,6 @@ class WasteIncinerationWarningSystemJiande:
 
         return alarms
 
-    # 注意：建德预警规则中没有活性炭投加量预警，已删除该方法
-
     def process_data(self, file_path: str, output_dir: str = None) -> pd.DataFrame:
         """处理数据并生成预警报告"""
         # 加载数据
@@ -643,38 +635,31 @@ class WasteIncinerationWarningSystemJiande:
         print(f"\n检查建德焚烧炉预警报警 (1个炉子)...")
 
         # === 预警规则 ===
-        # 1. 瞬时低炉温焚烧预警
         low_temp_warnings = self.check_low_furnace_temp_warning(df)
         self.warning_events.extend(low_temp_warnings)
         print(f"瞬时低炉温预警: {len(low_temp_warnings)} 条")
 
-        # 2. 炉膛温度偏高/过高预警
         high_temp_warnings = self.check_high_furnace_temp_warning(df)
         self.warning_events.extend(high_temp_warnings)
         print(f"高炉温预警: {len(high_temp_warnings)} 条")
 
-        # 3. 布袋除尘器压力损失预警
         pressure_warnings = self.check_bag_pressure_warning(df)
         self.warning_events.extend(pressure_warnings)
         print(f"压力预警: {len(pressure_warnings)} 条")
 
-        # 4. 焚烧炉出口氧含量预警
         o2_warnings = self.check_o2_warning(df)
         self.warning_events.extend(o2_warnings)
         print(f"氧含量预警: {len(o2_warnings)} 条")
 
-        # 5. 污染物浓度预警（小时均值）
         pollutant_warnings = self.check_pollutant_warning(df)
         self.warning_events.extend(pollutant_warnings)
         print(f"污染物预警: {len(pollutant_warnings)} 条")
 
         # === 报警规则 ===
-        # 1. 低炉温焚烧报警
         low_temp_alarms = self.check_low_furnace_temp_alarm(df)
         self.warning_events.extend(low_temp_alarms)
         print(f"低炉温报警: {len(low_temp_alarms)} 条")
 
-        # 2. 污染物排放超标报警（日均值）
         pollutant_alarms = self.check_pollutant_alarm(df)
         self.warning_events.extend(pollutant_alarms)
         print(f"污染物报警: {len(pollutant_alarms)} 条")
@@ -682,18 +667,15 @@ class WasteIncinerationWarningSystemJiande:
         # 转换为DataFrame
         if self.warning_events:
             warning_df = pd.DataFrame(self.warning_events)
-            # 按时间排序
             warning_df = warning_df.sort_values('时间')
 
             print(f"\n共检测到 {len(warning_df)} 条预警事件")
 
-            # 按炉号统计
             furnace_stats = warning_df['炉号'].value_counts().sort_index()
             print("各炉预警分布:")
             for furnace, count in furnace_stats.items():
                 print(f"  {furnace}号炉: {count} 条预警")
 
-            # 保存预警报告
             if output_dir:
                 self.save_warning_report(warning_df, output_dir, file_path)
 
@@ -707,7 +689,6 @@ class WasteIncinerationWarningSystemJiande:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        # 生成文件名
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -716,15 +697,12 @@ class WasteIncinerationWarningSystemJiande:
         warning_df.to_excel(excel_file, index=False)
         print(f"📊 预警报警报告已保存: {excel_file}")
 
-        # 保存CSV格式 (与输出模板格式一致)
+        # 保存CSV格式
         csv_file = os.path.join(output_dir, f"{base_name}_建德预警报警报告_{timestamp}.csv")
 
-        # 确保所有记录都有预警/报警区分列
         if '预警/报警区分' not in warning_df.columns:
-            # 如果没有该列，根据预警/报警类型自动填充
             warning_df['预警/报警区分'] = warning_df['预警/报警类型']
 
-        # 保留模板需要的列
         required_columns = ['时间', '炉号', '预警/报警类型', '预警/报警事件', '预警/报警区分']
         template_df = warning_df[required_columns].copy()
         template_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
@@ -738,13 +716,11 @@ class WasteIncinerationWarningSystemJiande:
             f.write(f"数据文件: {input_file}\n")
             f.write(f"总事件数量: {len(warning_df)}\n\n")
 
-            # 按预警/报警类型统计
             type_stats = warning_df['预警/报警类型'].value_counts()
             f.write("事件类型统计:\n")
             for event_type, count in type_stats.items():
                 f.write(f"  {event_type}: {count} 条\n")
 
-            # 按事件详细统计
             event_stats = warning_df['预警/报警事件'].value_counts()
             f.write("\n事件详细统计:\n")
             for event, count in event_stats.items():
@@ -754,21 +730,17 @@ class WasteIncinerationWarningSystemJiande:
 
         print(f"📈 统计报告已保存: {stats_file}")
 
-
 def main():
     """主函数 - 支持命令行和直接运行"""
     import sys
 
-    # 配置区域 - 可以直接修改这里的路径
     DEFAULT_INPUT_FILE = "6.1_process.csv"  # 默认输入文件
     DEFAULT_OUTPUT_DIR = "./预警输出"  # 默认输出目录
 
     if len(sys.argv) >= 2:
-        # 命令行模式
         input_file = sys.argv[1]
         output_dir = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUTPUT_DIR
     else:
-        # 直接运行模式
         print("🚀 直接运行模式")
         print("💡 提示: 可以修改代码中的DEFAULT_INPUT_FILE变量来指定要分析的文件")
         print("💡 提示: 使用 python shishi_data_yujing_gz.py <文件路径> 分析指定文件")
@@ -814,7 +786,6 @@ def main():
         print(f"❌ 处理过程中出现错误: {e}")
         import traceback
         traceback.print_exc()
-
 
 if __name__ == "__main__":
     main()
