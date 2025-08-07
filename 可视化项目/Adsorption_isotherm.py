@@ -560,80 +560,118 @@ class AdsorptionCurveProcessor:
         return valid_data
 
     def basic_data_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
-        """基础数据清洗 - 根据进口0出口1列值自适应处理"""
-        print("\n=== 基础数据清洗 ===")
+        """基础数据清洗 - 按照修改后需求文档执行两套基础清洗规则
+        
+        按照修改后需求文档严格执行：
+        1. 首先按风速进行时间段切分（在数据清洗前进行）
+        2. 然后进行数据清洗，执行两套基础清洗规则：
+           - 当检测到进口0出口1列值为2时的基础清洗规则
+           - 当检测到进口0出口1列值为0或1时的基础清洗规则
+        """
+        print("\n=== 基础数据清洗（两套基础清洗规则）===")
         original_count = len(data)
 
-        # 首先按风速进行时间段切分（根据需求文档第1点）
+        # 步骤1：首先按风速进行时间段切分（需求文档第1点）
+        print("\n步骤1: 按风速切分时间段（在数据清洗前进行）")
         data = self._split_by_wind_speed(data)
         
         if len(data) == 0:
             print("风速切分后无有效数据，程序结束")
             return data
 
-        # 识别数据类型
+        # 步骤2：识别数据类型
+        print("\n步骤2: 识别数据类型")
         data_type = self.identify_data_type(data)
 
-        # 剔除风量=0的数据（所有类型通用）
+        # 步骤3：通用数据清洗 - 剔除风量=0的数据
+        print("\n步骤3: 通用数据清洗")
         before_flow_removal = len(data)
         data = data[data['风量'] > 0].copy()
         print(f"剔除风量=0的数据: {len(data)} 条 (剔除 {before_flow_removal - len(data)} 条)")
 
-        # 根据进口0出口1列值选择不同的清洗方式
+        # 步骤4：执行两套基础清洗规则（需求文档第2点）
+        print("\n步骤4: 执行两套基础清洗规则")
         if data_type == 'simultaneous':
-            # 进口0出口1=2：同时记录型数据清洗
-            data = self._clean_simultaneous_records(data)
+            # 基础清洗规则1：进口0出口1=2的基础清洗规则
+            print("执行基础清洗规则1：同时记录型数据（进口0出口1=2）")
+            data = self._basic_clean_simultaneous_records(data)
 
         elif data_type == 'switching':
-            # 进口0出口1=0或1：切换型数据清洗
-            data = self._clean_switching_records(data)
+            # 基础清洗规则2：进口0出口1=0或1的基础清洗规则
+            print("执行基础清洗规则2：切换型数据（进口0出口1=0或1）")
+            data = self._basic_clean_switching_records(data)
 
         else:  # mixed
-            # 混合型：分别处理不同类型的记录
-            data = self._clean_mixed_records(data)
+            # 混合型：分别应用两套基础清洗规则
+            print("执行混合型数据基础清洗：应用两套基础清洗规则")
+            data = self._basic_clean_mixed_records(data)
 
-        print(f"基础清洗完成: {len(data)} 条记录")
+        print(f"\n基础清洗完成: {len(data)} 条记录")
         return data
 
-    def _clean_simultaneous_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗同时记录型数据（进口0出口1=2）
+    def _basic_clean_simultaneous_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """基础清洗规则1：同时记录型数据（进口0出口1=2）
         
-        同步型数据的清洗规则：
-        1. 去除进口或出口浓度为0的记录
+        按照修改后需求文档的基础清洗规则：
+        当检测到进口0出口1列值为2时：
+        1. 去除进口浓度和出口浓度存在0值的记录
         2. 去除出口浓度大于进口浓度的记录
-        3. 计算穿透率和处理效率
+        注意：这是基础清洗阶段，高级筛选（KS检验和箱型图）将在后续步骤中进行
         """
-        print("3. 处理同时记录型数据 (进口0出口1=2):")
+        print("   基础清洗规则1：处理同时记录型数据 (进口0出口1=2):")
 
+        # 分离同时记录型数据和其他数据
         simultaneous_data = data[data['进口0出口1'] == 2].copy()
         other_data = data[data['进口0出口1'] != 2].copy()
 
         if len(simultaneous_data) == 0:
-            print("   未找到同时记录数据")
+            print("      未找到同时记录数据")
             return data
 
         original_count = len(simultaneous_data)
+        print(f"      发现同时记录型数据: {original_count} 条")
 
-        # 3.1 去除进口浓度和出口浓度存在0值的记录
+        # 步骤1：去除进口浓度和出口浓度存在0值的记录（需求文档要求）
         before_zero_removal = len(simultaneous_data)
         simultaneous_data = simultaneous_data[
             (simultaneous_data['进口voc'] > 0) &
             (simultaneous_data['出口voc'] > 0)
         ].copy()
-        print(f"   3.1 去除进口或出口浓度为0的记录: {len(simultaneous_data)} 条 (剔除 {before_zero_removal - len(simultaneous_data)} 条)")
+        removed_zero = before_zero_removal - len(simultaneous_data)
+        print(f"      去除进口浓度和出口浓度存在0值的记录: 保留 {len(simultaneous_data)} 条 (剔除 {removed_zero} 条)")
 
-        # 3.2 去除出口浓度大于进口浓度的记录
+        # 步骤2：去除出口浓度大于进口浓度的记录（需求文档要求）
         before_logic_removal = len(simultaneous_data)
         simultaneous_data = simultaneous_data[
-            simultaneous_data['进口voc'] >= simultaneous_data['出口voc']
+            simultaneous_data['出口voc'] <= simultaneous_data['进口voc']
         ].copy()
-        print(f"   3.2 去除出口浓度>进口浓度的记录: {len(simultaneous_data)} 条 (剔除 {before_logic_removal - len(simultaneous_data)} 条)")
+        removed_logic = before_logic_removal - len(simultaneous_data)
+        print(f"      去除出口浓度大于进口浓度的记录: 保留 {len(simultaneous_data)} 条 (剔除 {removed_logic} 条)")
 
-        # 3.3 计算穿透率和处理效率
+        # 步骤3：计算穿透率和处理效率（为后续分析做准备）
         if len(simultaneous_data) > 0:
             simultaneous_data['穿透率'] = simultaneous_data['出口voc'] / simultaneous_data['进口voc']
             simultaneous_data['处理效率'] = (1 - simultaneous_data['穿透率']) * 100
-            print(f"   3.3 计算穿透率和效率完成，平均效率: {simultaneous_data['处理效率'].mean():.2f}%")
+            
+            # 按照需求文档要求：删除明显异常的穿透率数据点
+            before_breakthrough_cleaning = len(simultaneous_data)
+            # 删除穿透率>1的异常数据点（物理上不可能）
+            simultaneous_data = simultaneous_data[simultaneous_data['穿透率'] <= 1.0]
+            # 删除穿透率<0的异常数据点（物理上不可能）
+            simultaneous_data = simultaneous_data[simultaneous_data['穿透率'] >= 0.0]
+            # 删除效率<0或>100的异常数据点
+            simultaneous_data = simultaneous_data[
+                (simultaneous_data['处理效率'] >= 0) & 
+                (simultaneous_data['处理效率'] <= 100)
+            ]
+            removed_breakthrough_outliers = before_breakthrough_cleaning - len(simultaneous_data)
+            if removed_breakthrough_outliers > 0:
+                print(f"      删除明显异常的穿透率数据点: 剔除 {removed_breakthrough_outliers} 条")
+            
+            if len(simultaneous_data) > 0:
+                print(f"      计算穿透率和效率完成，平均效率: {simultaneous_data['处理效率'].mean():.2f}%")
+            else:
+                print("      警告：穿透率异常值清理后无有效数据")
 
         # 合并数据
         if len(other_data) > 0:
@@ -641,32 +679,41 @@ class AdsorptionCurveProcessor:
         else:
             result_data = simultaneous_data
 
+        # 按时间排序
         result_data = result_data.sort_values('创建时间').reset_index(drop=True)
-        print(f"   同时记录型数据清洗完成: {original_count} → {len(simultaneous_data)} 条")
+        
+        total_removed = original_count - len(simultaneous_data)
+        print(f"      同时记录型数据清洗完成: {original_count} → {len(simultaneous_data)} 条 (总共剔除 {total_removed} 条)")
+        print("      注意：KS检验和箱型图异常值剔除将在后续步骤中进行")
 
         return result_data
 
-    def _clean_switching_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗切换型数据（进口0出口1=0或1）
+    def _basic_clean_switching_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """基础清洗规则2：切换型数据（进口0出口1=0或1）
 
-        切换型数据的清洗规则（根据需求文档）：
-        1. 根据进口0出口1列值切分时间段并打上标签
-        2. 根据进口0出口1列值分别去除相应浓度为0的记录
-        3. 匹配进口和出口时间段，去除出口浓度大于进口浓度平均值的记录
+        按照修改后需求文档的基础清洗规则：
+        当检测到进口0出口1值为0或1时：
+        1. 根据进口0出口1列的值切分时间段并打上标签
+        2. 在切分出的小时间段中进行数据清洗，去除对应进口浓度或出口浓度为0值的记录
+        3. 根据第一个检测到的时间段匹配下一个时间段，将两段时间拼接当作一个时间段
+        4. 进行筛选，去除出口浓度大于进口浓度的平均值
+        注意：这是基础清洗阶段，高级筛选（KS检验和箱型图）将在后续步骤中进行
         """
-        print("3. 处理切换型数据 (进口0出口1=0或1):")
+        print("   基础清洗规则2：处理切换型数据 (进口0出口1=0或1):")
 
-        # 按时间排序
+        # 步骤1：按时间排序
         data = data.sort_values('创建时间').reset_index(drop=True)
 
-        # 根据需求文档：根据进口0出口1列值切分时间段并打上标签
+        # 步骤2：根据进口0出口1列值切分时间段并打上标签（需求文档要求）
+        print("      步骤1: 根据进口0出口1列值切分时间段并打上标签")
         data_with_segments = self._segment_switching_data(data)
 
         if len(data_with_segments) == 0:
-            print("   切换型数据时间段切分后无有效数据")
+            print("      切换型数据时间段切分后无有效数据")
             return pd.DataFrame()
 
-        # 根据进口0出口1列值分别去除相应浓度为0的记录
+        # 步骤3：在切分出的小时间段中进行数据清洗（需求文档要求）
+        print("      步骤2: 在切分出的小时间段中进行数据清洗")
         before_cleaning = len(data_with_segments)
 
         # 去除进口浓度为0的记录（当进口0出口1=0时）
@@ -678,25 +725,28 @@ class AdsorptionCurveProcessor:
 
         cleaned_data = data_with_segments[inlet_mask | outlet_mask | other_mask].copy()
         removed_count = before_cleaning - len(cleaned_data)
-        print(f"   3.1 去除浓度为0的记录: {len(cleaned_data)} 条 (剔除 {removed_count} 条)")
+        print(f"      去除对应进口浓度或出口浓度为0值的记录: 保留 {len(cleaned_data)} 条 (剔除 {removed_count} 条)")
 
-        # 根据需求文档：匹配进口和出口时间段，筛选出口浓度不能大于进口浓度平均值的记录
+        # 步骤4：匹配进口和出口时间段（需求文档要求）
+        print("      步骤3: 匹配进口和出口时间段，筛选异常记录")
         if len(cleaned_data) > 0:
             final_data = self._match_and_filter_switching_segments(cleaned_data)
         else:
             final_data = cleaned_data
 
-        print(f"   切换型数据清洗完成: {len(final_data)} 条")
+        print(f"      切换型数据清洗完成: 保留 {len(final_data)} 条记录")
+        print("      注意：KS检验和箱型图异常值剔除将在后续步骤中进行")
+        
         return final_data
 
     def _segment_switching_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """根据需求文档：根据进口0出口1列值切分时间段并打上标签
 
-        切分规则：
-        - 从检测到进口0出口1列为0的记录开始，到检测到进口0出口1列为1的记录结束，标记为进口浓度时间段
-        - 从检测到进口0出口1列为1的记录开始，到检测到进口0出口1列为0的记录结束，标记为出口浓度时间段
+        按照需求文档的切分规则：
+        - 从检测到进口0出口1列为0的记录的时间开始，到检测到进口0出口1列为1的记录的时间结束，标记为进口浓度时间段
+        - 从检测到进口0出口1列为1的记录的时间开始，到检测到进口0出口1列为0的记录的时间结束，标记为出口浓度时间段
         """
-        print("   3.1 根据进口0出口1列值切分时间段并打上标签")
+        print("         根据进口0出口1列值切分时间段并打上标签")
 
         if len(data) == 0:
             return data
@@ -741,18 +791,25 @@ class AdsorptionCurveProcessor:
         outlet_segments = data[data['浓度时间段'] == 2]['时间段序号'].nunique()
         total_segments = data[data['浓度时间段'] > 0]['时间段序号'].nunique()
 
-        print(f"      识别出 {total_segments} 个时间段：{inlet_segments} 个进口时间段，{outlet_segments} 个出口时间段")
+        print(f"         识别出 {total_segments} 个时间段：{inlet_segments} 个进口时间段，{outlet_segments} 个出口时间段")
 
         # 只保留被分配到时间段的数据
         segmented_data = data[data['浓度时间段'] > 0].copy()
         removed_count = len(data) - len(segmented_data)
-        print(f"      保留时间段内的数据: {len(segmented_data)} 条 (剔除 {removed_count} 条)")
+        print(f"         保留时间段内的数据: {len(segmented_data)} 条 (剔除 {removed_count} 条)")
 
         return segmented_data
 
     def _match_and_filter_switching_segments(self, data: pd.DataFrame) -> pd.DataFrame:
-        """根据需求文档：匹配进口和出口时间段，筛选出口浓度不能大于进口浓度平均值的记录"""
-        print("   3.2 匹配进口和出口时间段，筛选异常记录")
+        """根据需求文档第3点要求：匹配进口和出口时间段，筛选异常记录
+        
+        按照需求文档要求：
+        1. 根据第一个检测到的时间段为进口浓度或出口浓度，匹配下一个出口浓度时间段或进口浓度时间段
+        2. 将两段时间拼接然后进行筛选，即出口浓度不能大于进口浓度的平均值
+        3. 如果没有匹配到下一个对应的进口浓度或出口浓度时间段，弃用该段时间
+        4. 将两段时间拼接为一个大的时间段计算穿透率
+        """
+        print("         匹配进口和出口时间段，筛选异常记录")
 
         if len(data) == 0:
             return data
@@ -826,7 +883,44 @@ class AdsorptionCurveProcessor:
                         valid_combined_data = pd.concat([inlet_data, valid_outlet_data], ignore_index=True)
                         valid_combined_data = valid_combined_data.sort_values('创建时间').reset_index(drop=True)
                         valid_combined_data['拼接时间段'] = combined_segment_id
-                        valid_records.append(valid_combined_data)
+                        
+                        # 按照需求文档要求：计算穿透率并删除明显异常的穿透率数据点
+                        # 对于切换型数据的正确理解：
+                        # - 进口时间段(进口0出口1=0)：使用进口voc列的值作为进口浓度
+                        # - 出口时间段(进口0出口1=1)：使用出口voc列的值作为出口浓度
+                        
+                        # 计算进口浓度时间段的平均值（使用进口voc列）
+                        inlet_concentrations = inlet_data[inlet_data['进口0出口1'] == 0]['进口voc']
+                        inlet_avg_conc = inlet_concentrations.mean() if len(inlet_concentrations) > 0 else 0
+                        
+                        # 计算出口浓度时间段的平均值（使用出口voc列）
+                        outlet_concentrations = valid_outlet_data[valid_outlet_data['进口0出口1'] == 1]['出口voc']
+                        outlet_avg_conc = outlet_concentrations.mean() if len(outlet_concentrations) > 0 else 0
+                        
+                        # 穿透率 = 出口浓度时间段平均值 / 进口浓度时间段平均值
+                        segment_breakthrough = outlet_avg_conc / inlet_avg_conc if inlet_avg_conc > 0 else 0
+                        segment_efficiency = (1 - segment_breakthrough) * 100
+                        
+                        valid_combined_data['穿透率'] = segment_breakthrough
+                        valid_combined_data['处理效率'] = segment_efficiency
+                        
+                        print(f"        进口浓度段平均值: {inlet_avg_conc:.2f}, 出口浓度段平均值: {outlet_avg_conc:.2f}")
+                        print(f"        计算穿透率: {segment_breakthrough:.3f} ({segment_breakthrough*100:.1f}%)")
+                        
+                        # 删除明显异常的穿透率数据点
+                        before_cleaning = len(valid_combined_data)
+                        valid_combined_data = valid_combined_data[
+                            (valid_combined_data['穿透率'] >= 0.0) & 
+                            (valid_combined_data['穿透率'] <= 1.0) &
+                            (valid_combined_data['处理效率'] >= 0) & 
+                            (valid_combined_data['处理效率'] <= 100)
+                        ]
+                        removed_outliers = before_cleaning - len(valid_combined_data)
+                        if removed_outliers > 0:
+                            print(f"        删除明显异常的穿透率数据点: 剔除 {removed_outliers} 条")
+                        
+                        if len(valid_combined_data) > 0:
+                            valid_records.append(valid_combined_data)
                     else:
                         # 如果出口数据全部被筛选掉，只保留进口数据
                         inlet_data_copy = inlet_data.copy()
@@ -881,7 +975,44 @@ class AdsorptionCurveProcessor:
                         valid_combined_data = pd.concat([valid_outlet_data, inlet_data], ignore_index=True)
                         valid_combined_data = valid_combined_data.sort_values('创建时间').reset_index(drop=True)
                         valid_combined_data['拼接时间段'] = combined_segment_id
-                        valid_records.append(valid_combined_data)
+                        
+                        # 按照需求文档要求：计算穿透率并删除明显异常的穿透率数据点
+                        # 对于切换型数据的正确理解：
+                        # - 进口时间段(进口0出口1=0)：使用进口voc列的值作为进口浓度
+                        # - 出口时间段(进口0出口1=1)：使用出口voc列的值作为出口浓度
+                        
+                        # 计算进口浓度时间段的平均值（使用进口voc列）
+                        inlet_concentrations = inlet_data[inlet_data['进口0出口1'] == 0]['进口voc']
+                        inlet_avg_conc = inlet_concentrations.mean() if len(inlet_concentrations) > 0 else 0
+                        
+                        # 计算出口浓度时间段的平均值（使用出口voc列）
+                        outlet_concentrations = valid_outlet_data[valid_outlet_data['进口0出口1'] == 1]['出口voc']
+                        outlet_avg_conc = outlet_concentrations.mean() if len(outlet_concentrations) > 0 else 0
+                        
+                        # 穿透率 = 出口浓度时间段平均值 / 进口浓度时间段平均值
+                        segment_breakthrough = outlet_avg_conc / inlet_avg_conc if inlet_avg_conc > 0 else 0
+                        segment_efficiency = (1 - segment_breakthrough) * 100
+                        
+                        valid_combined_data['穿透率'] = segment_breakthrough
+                        valid_combined_data['处理效率'] = segment_efficiency
+                        
+                        print(f"        进口浓度段平均值: {inlet_avg_conc:.2f}, 出口浓度段平均值: {outlet_avg_conc:.2f}")
+                        print(f"        计算穿透率: {segment_breakthrough:.3f} ({segment_breakthrough*100:.1f}%)")
+                        
+                        # 删除明显异常的穿透率数据点
+                        before_cleaning = len(valid_combined_data)
+                        valid_combined_data = valid_combined_data[
+                            (valid_combined_data['穿透率'] >= 0.0) & 
+                            (valid_combined_data['穿透率'] <= 1.0) &
+                            (valid_combined_data['处理效率'] >= 0) & 
+                            (valid_combined_data['处理效率'] <= 100)
+                        ]
+                        removed_outliers = before_cleaning - len(valid_combined_data)
+                        if removed_outliers > 0:
+                            print(f"        删除明显异常的穿透率数据点: 剔除 {removed_outliers} 条")
+                        
+                        if len(valid_combined_data) > 0:
+                            valid_records.append(valid_combined_data)
                     else:
                         # 如果出口数据全部被筛选掉，只保留进口数据
                         inlet_data_copy = inlet_data.copy()
@@ -915,40 +1046,38 @@ class AdsorptionCurveProcessor:
             print("      警告: 时间段匹配筛选后无有效数据")
             return pd.DataFrame()
 
-    def _clean_mixed_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗混合型数据
+    def _basic_clean_mixed_records(self, data: pd.DataFrame) -> pd.DataFrame:
+        """基础清洗：混合型数据
         
-        混合型数据的清洗规则：
-        1. 根据进口0出口1列值分别处理同步型和切换型数据
-        2. 对于同步型数据（进口0出口1=2）：
-           - 去除进口或出口浓度为0的记录
-           - 去除出口浓度大于进口浓度的记录
-        3. 对于切换型数据（进口0出口1=0或1）：
-           - 根据进口0出口1列值切分时间段并打上标签
-           - 根据进口0出口1列值分别去除相应浓度为0的记录
-           - 通过时间匹配去除出口浓度大于进口浓度的记录
+        混合型数据的基础清洗规则（按照修改后需求文档）：
+        1. 分别处理同时记录型（进口0出口1=2）和切换型（进口0出口1=0或1）数据
+        2. 对于同时记录型数据：应用基础清洗规则1
+        3. 对于切换型数据：应用基础清洗规则2
+        注意：这是基础清洗阶段，高级筛选（KS检验和箱型图）将在后续步骤中进行
         """
-        print("3. 处理混合型数据:")
+        print("   基础清洗：处理混合型数据:")
 
         # 分别处理不同类型的数据
         simultaneous_data = data[data['进口0出口1'] == 2].copy()
         switching_data = data[data['进口0出口1'].isin([0, 1])].copy()
         other_data = data[~data['进口0出口1'].isin([0, 1, 2])].copy()
 
-        print(f"   同时记录数据: {len(simultaneous_data)} 条")
-        print(f"   切换数据: {len(switching_data)} 条")
-        print(f"   其他数据: {len(other_data)} 条")
+        print(f"      同时记录数据: {len(simultaneous_data)} 条")
+        print(f"      切换数据: {len(switching_data)} 条")
+        print(f"      其他数据: {len(other_data)} 条")
 
         cleaned_parts = []
 
-        # 处理同时记录数据
+        # 处理同时记录数据（应用基础清洗规则1）
         if len(simultaneous_data) > 0:
-            cleaned_simultaneous = self._clean_simultaneous_records(simultaneous_data)
+            print("      处理同时记录型数据（应用基础清洗规则1）")
+            cleaned_simultaneous = self._basic_clean_simultaneous_records(simultaneous_data)
             cleaned_parts.append(cleaned_simultaneous[cleaned_simultaneous['进口0出口1'] == 2])
 
-        # 处理切换数据
+        # 处理切换数据（应用基础清洗规则2）
         if len(switching_data) > 0:
-            cleaned_switching = self._clean_switching_records(switching_data)
+            print("      处理切换型数据（应用基础清洗规则2）")
+            cleaned_switching = self._basic_clean_switching_records(switching_data)
             cleaned_parts.append(cleaned_switching[cleaned_switching['进口0出口1'].isin([0, 1])])
 
         # 添加其他数据
@@ -1311,25 +1440,145 @@ class AdsorptionCurveProcessor:
         else:
             return pd.DataFrame()
     
-    def calculate_efficiency_data(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
-        """计算吸附效率数据 - 修改为按需求文档要求处理"""
-        print(f"\n=== 计算{method_name}吸附效率 ===")
+    def calculate_efficiency_with_two_rules(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
+        """按照修改后需求文档计算效率数据 - 实现两套穿透率和效率规则"""
+        print(f"\n=== 计算{method_name}筛选数据的吸附效率（两套规则）===")
 
         if len(data) == 0:
             print(f"警告: {method_name}数据为空")
             return None
 
-        # 识别数据类型
-        data_type = self.identify_data_type(data)
-
-        if data_type == 'simultaneous':
-            # 同时记录型数据：直接使用已计算的穿透率和效率
-            return self._calculate_efficiency_for_simultaneous(data, method_name)
-        elif data_type in ['switching', 'mixed']:
-            # 切换型数据：根据时间段匹配计算效率
-            return self._calculate_efficiency_for_switching(data, method_name)
+        # 分离不同类型的数据
+        simultaneous_data = data[data['进口0出口1'] == 2].copy()
+        switching_data = data[data['进口0出口1'].isin([0, 1])].copy()
+        
+        efficiency_records = []
+        
+        # 规则1：当进口0出口1列为2时，以风速切分的时间段，计算效率和穿透率
+        if len(simultaneous_data) > 0:
+            print(f"\n规则1：同时记录型数据（进口0出口1=2）- 以风速切分的时间段计算")
+            simultaneous_efficiency = self._calculate_efficiency_rule1_wind_segments(simultaneous_data, method_name)
+            if simultaneous_efficiency is not None and len(simultaneous_efficiency) > 0:
+                efficiency_records.append(simultaneous_efficiency)
+        
+        # 规则2：当进口0出口1列为0或1时，以基础清洗拼接的时间段，计算效率和穿透率
+        if len(switching_data) > 0:
+            print(f"\n规则2：切换型数据（进口0出口1=0或1）- 以拼接时间段计算")
+            switching_efficiency = self._calculate_efficiency_rule2_spliced_segments(switching_data, method_name)
+            if switching_efficiency is not None and len(switching_efficiency) > 0:
+                efficiency_records.append(switching_efficiency)
+        
+        # 合并所有效率数据
+        if efficiency_records:
+            result = pd.concat(efficiency_records, ignore_index=True)
+            result = result.sort_values('时间坐标').reset_index(drop=True)
+            print(f"\n两套规则计算完成，总效率数据点: {len(result)} 个")
+            return result
         else:
-            print(f"警告: 未知数据类型，无法计算效率")
+            print(f"\n警告: 无法计算{method_name}的效率数据")
+            return None
+
+    def _calculate_efficiency_rule1_wind_segments(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
+        """规则1：以风速切分的时间段计算效率和穿透率（进口0出口1=2）"""
+        print(f"   按风速段计算同时记录型数据效率: {len(data)} 条")
+        
+        if len(data) == 0:
+            return None
+            
+        efficiency_records = []
+        start_time = data['创建时间'].min()
+        
+        # 按风速段分组计算效率
+        wind_segments = data['风速段'].unique()
+        wind_segments = wind_segments[wind_segments > 0]  # 只处理有效风速段
+        
+        for segment_id in sorted(wind_segments):
+            segment_data = data[data['风速段'] == segment_id]
+            
+            if len(segment_data) > 0:
+                # 计算该风速段的平均效率和穿透率
+                avg_efficiency = segment_data['处理效率'].mean()
+                avg_breakthrough = segment_data['穿透率'].mean()
+                avg_inlet = segment_data['进口voc'].mean()
+                avg_outlet = segment_data['出口voc'].mean()
+                
+                # 计算时间坐标（使用风速段的中间时间）
+                segment_start = segment_data['创建时间'].min()
+                segment_end = segment_data['创建时间'].max()
+                segment_middle = segment_start + (segment_end - segment_start) / 2
+                time_hours = (segment_middle - start_time).total_seconds() / 3600
+                
+                efficiency_records.append({
+                    '时间坐标': time_hours,
+                    '穿透率': avg_breakthrough,
+                    '处理效率': avg_efficiency,
+                    '进口浓度': avg_inlet,
+                    '出口浓度': avg_outlet,
+                    '风速段': segment_id,
+                    '数据点数': len(segment_data),
+                    '计算规则': '规则1-风速段'
+                })
+                
+                print(f"      风速段 {segment_id}: 时间 {time_hours:.2f}h, 效率 {avg_efficiency:.2f}%, 穿透率 {avg_breakthrough:.3f}")
+        
+        if efficiency_records:
+            result = pd.DataFrame(efficiency_records)
+            print(f"   规则1计算完成: {len(result)} 个效率数据点")
+            return result
+        else:
+            print(f"   规则1计算失败: 无有效数据点")
+            return None
+
+    def _calculate_efficiency_rule2_spliced_segments(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
+        """规则2：以拼接时间段计算效率和穿透率（进口0出口1=0或1）"""
+        print(f"   按拼接时间段计算切换型数据效率: {len(data)} 条")
+        
+        # 检查是否有拼接时间段标记
+        if '拼接时间段' not in data.columns:
+            print("   警告: 切换型数据缺少拼接时间段标记，无法计算效率")
+            return None
+            
+        efficiency_records = []
+        start_time = data['创建时间'].min()
+        
+        # 按拼接时间段分组计算效率
+        spliced_segments = data['拼接时间段'].dropna().unique()
+        
+        for segment_id in spliced_segments:
+            segment_data = data[data['拼接时间段'] == segment_id]
+            
+            if len(segment_data) > 0 and '穿透率' in segment_data.columns:
+                # 计算该拼接时间段的平均效率和穿透率
+                avg_efficiency = segment_data['处理效率'].mean()
+                avg_breakthrough = segment_data['穿透率'].mean()
+                avg_inlet = segment_data['进口voc'].mean()
+                avg_outlet = segment_data['出口voc'].mean()
+                
+                # 计算时间坐标（使用拼接时间段的中间时间）
+                segment_start = segment_data['创建时间'].min()
+                segment_end = segment_data['创建时间'].max()
+                segment_middle = segment_start + (segment_end - segment_start) / 2
+                time_hours = (segment_middle - start_time).total_seconds() / 3600
+                
+                efficiency_records.append({
+                    '时间坐标': time_hours,
+                    '穿透率': avg_breakthrough,
+                    '处理效率': avg_efficiency,
+                    '进口浓度': avg_inlet,
+                    '出口浓度': avg_outlet,
+                    '拼接时间段': segment_id,
+                    '数据点数': len(segment_data),
+                    '计算规则': '规则2-拼接段'
+                })
+                
+                print(f"      拼接段 {segment_id}: 时间 {time_hours:.2f}h, 效率 {avg_efficiency:.2f}%, 穿透率 {avg_breakthrough:.3f}")
+        
+        if efficiency_records:
+            result = pd.DataFrame(efficiency_records)
+            print(f"   规则2计算完成: {len(result)} 个效率数据点")
+            return result
+        else:
+            print(f"   规则2计算失败: 无有效数据点")
             return None
 
     def _calculate_efficiency_for_simultaneous(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
@@ -1367,7 +1616,7 @@ class AdsorptionCurveProcessor:
                 time_seconds = (segment_mid_time - start_time).total_seconds()
 
                 efficiency_records.append({
-                    'time': time_seconds,
+                    '时间坐标': time_seconds / 3600,  # 转换为小时
                     'efficiency': avg_efficiency,
                     'breakthrough_ratio': avg_breakthrough,
                     'inlet_conc': avg_inlet,
@@ -1467,7 +1716,7 @@ class AdsorptionCurveProcessor:
                         time_seconds = (combined_mid_time - start_time).total_seconds()
 
                         efficiency_records.append({
-                            'time': time_seconds,
+                            '时间坐标': time_seconds / 3600,  # 转换为小时
                             'efficiency': efficiency,
                             'breakthrough_ratio': breakthrough_ratio,
                             'inlet_conc': avg_inlet,
@@ -1534,7 +1783,7 @@ class AdsorptionCurveProcessor:
                         time_seconds = (combined_mid_time - start_time).total_seconds()
 
                         efficiency_records.append({
-                            'time': time_seconds,
+                            '时间坐标': time_seconds / 3600,  # 转换为小时
                             'efficiency': efficiency,
                             'breakthrough_ratio': breakthrough_ratio,
                             'inlet_conc': avg_inlet,
@@ -1578,7 +1827,7 @@ class AdsorptionCurveProcessor:
         print(f"   原始效率数据点数: {len(efficiency_data)}")
 
         # 按时间排序
-        efficiency_data_sorted = efficiency_data.sort_values('time').reset_index(drop=True)
+        efficiency_data_sorted = efficiency_data.sort_values('时间坐标').reset_index(drop=True)
 
         # 将数据分成16组，用于标记大时间段，但不能超过数据点数量
         target_groups = min(16, len(efficiency_data_sorted))
@@ -1645,8 +1894,8 @@ class AdsorptionCurveProcessor:
             point_data = {
                 'segment': i + 1,  # 原始序号
                 'group_idx': group_idx + 1,  # 所属大时间段
-                'time_start': row['time'],
-                'time_end': row['time'],
+                'time_start': row['时间坐标'],
+                'time_end': row['时间坐标'],
                 'time_start_str': individual_start,
                 'time_end_str': individual_end,
                 'time_display': individual_time_display,
@@ -1865,7 +2114,7 @@ class AdsorptionCurveProcessor:
         print(f"效率数据点数: {len(efficiency_data)}")
 
         # 准备数据 - 使用穿透率而不是效率
-        time_data = efficiency_data['time'].values
+        time_data = efficiency_data['时间坐标'].values
         breakthrough_ratio_data = efficiency_data['breakthrough_ratio'].values
 
         print(f"穿透率范围: {breakthrough_ratio_data.min():.3f} - {breakthrough_ratio_data.max():.3f}")
@@ -1878,7 +2127,7 @@ class AdsorptionCurveProcessor:
             self.warning_events = []
             for _, row in efficiency_data.iterrows():
                 # 检查是否达到预警点
-                current_time = row['time']
+                current_time = row['时间坐标']
                 current_breakthrough = row['breakthrough_ratio']
 
                 # 根据需求文档：当某时间段的出口浓度/进口浓度达到预警点时，推送预警信息
@@ -1976,31 +2225,15 @@ class AdsorptionCurveProcessor:
         if base_datetime is None:
             base_datetime = datetime(2024, 7, 30, 0, 0, 0)  # 默认基准时间
 
-        # 计算累积时间段时长（新的时间计算方式）
+        # 计算累积时间段时长（修复后的时间计算方式）
         def calculate_cumulative_segment_time(data):
             """计算累积的时间段时长"""
-            cumulative_hours = []
-            total_duration = 0
-
-            for i in range(len(data)):
-                if i == 0:
-                    # 第一个数据点，假设时间段长度为下一个点的时间间隔
-                    if len(data) > 1:
-                        segment_duration = data.iloc[1]['time'] - data.iloc[0]['time']
-                    else:
-                        segment_duration = 1800  # 默认30分钟
-                else:
-                    # 计算当前点与前一个点的时间间隔作为当前时间段长度
-                    segment_duration = data.iloc[i]['time'] - data.iloc[i-1]['time']
-
-                total_duration += segment_duration
-                cumulative_hours.append(total_duration / 3600)  # 转换为小时
-
-            return cumulative_hours
+            # 直接使用时间坐标，因为它已经是小时单位
+            return data['时间坐标'].tolist()
 
         # 使用新的时间计算方式
         time_hours = calculate_cumulative_segment_time(efficiency_data)
-        breakthrough_percent = efficiency_data['breakthrough_ratio'] * 100  # 转换为百分比
+        breakthrough_percent = efficiency_data['穿透率'] * 100  # 转换为百分比
 
         ax1.plot(time_hours, breakthrough_percent, 'b-', linewidth=1.5,
                 alpha=0.8, label='实际穿透率(出口浓度/进口浓度)')
@@ -2038,17 +2271,17 @@ class AdsorptionCurveProcessor:
                     ax1._click_annotations = []
 
                     # 创建新的标注 - 按照清洗后图像的格式
-                    time_seconds = efficiency_data.iloc[i]['time']
+                    time_seconds = efficiency_data.iloc[i]['时间坐标'] * 3600  # 转换为秒
 
                     # 计算实际时间段的开始时间
                     start_time = base_datetime + timedelta(seconds=time_seconds)
 
                     # 计算时间段长度（基于相邻数据点的时间间隔）
                     if i < len(efficiency_data) - 1:
-                        next_time_seconds = efficiency_data.iloc[i + 1]['time']
+                        next_time_seconds = efficiency_data.iloc[i + 1]['时间坐标'] * 3600
                         segment_duration = next_time_seconds - time_seconds
                     elif i > 0:
-                        prev_time_seconds = efficiency_data.iloc[i - 1]['time']
+                        prev_time_seconds = efficiency_data.iloc[i - 1]['时间坐标'] * 3600
                         segment_duration = time_seconds - prev_time_seconds
                     else:
                         segment_duration = 1800  # 默认30分钟
@@ -2110,24 +2343,18 @@ class AdsorptionCurveProcessor:
         if self.warning_model.fitted:
             # 注意：预测曲线仍然基于原始时间计算，因为模型是基于原始时间训练的
             # 但显示时需要转换为累积时间段格式
-            max_time = efficiency_data['time'].max()
+            max_time = efficiency_data['时间坐标'].max()
             if self.warning_model.predicted_saturation_time:
                 extend_time = max(max_time * 1.3, self.warning_model.predicted_saturation_time * 1.1)
             else:
                 extend_time = max_time * 1.5
 
-            time_smooth = np.linspace(efficiency_data['time'].min(), extend_time, 500)
+            time_smooth = np.linspace(efficiency_data['时间坐标'].min(), extend_time, 500)
             bt_smooth = self.warning_model.predict_breakthrough(time_smooth)
 
             # 将预测时间转换为累积时间段格式
-            # 这里需要根据原始数据的时间间隔来估算累积时间
-            avg_interval = np.mean(np.diff(efficiency_data['time']))  # 平均时间间隔
-            cumulative_smooth_hours = []
-            for t in time_smooth:
-                # 估算到时间t为止的累积时间段数
-                num_segments = (t - efficiency_data['time'].min()) / avg_interval
-                cumulative_time = num_segments * avg_interval / 3600  # 转换为小时
-                cumulative_smooth_hours.append(cumulative_time)
+            # 现在时间坐标已经是小时，直接使用
+            cumulative_smooth_hours = time_smooth.copy()
 
             bt_smooth_percent = bt_smooth * 100
 
@@ -2147,12 +2374,8 @@ class AdsorptionCurveProcessor:
             # 标记关键时间点（转换为累积时间段格式）
             def convert_to_cumulative_time(original_time):
                 """将原始时间转换为累积时间段格式"""
-                if original_time <= efficiency_data['time'].min():
-                    return 0
-                # 估算到该时间点的累积时间段数
-                avg_interval = np.mean(np.diff(efficiency_data['time']))
-                num_segments = (original_time - efficiency_data['time'].min()) / avg_interval
-                return num_segments * avg_interval / 3600  # 转换为小时
+                # 现在时间坐标已经是小时，直接返回
+                return original_time
 
             if self.warning_model.breakthrough_start_time:
                 start_time_h = convert_to_cumulative_time(self.warning_model.breakthrough_start_time)
@@ -2301,8 +2524,16 @@ class AdsorptionCurveProcessor:
         return fig
 
     def process_and_visualize(self):
-        """完整的数据处理和可视化流程"""
+        """完整的数据处理和可视化流程
+        
+        严格按照需求文档执行：
+        1. 从检测到风速>=0.5的时间为起点，直至检测到风速<0.5的记录的时间结束，以这种方式切分为一个个时间段
+        2. 然后进行数据清洗，此时有两套清洗规则
+        3. 通过KS检验和箱型图检验剔除异常值
+        4. 根据现有算法进行预警系统的可视化（遵循现有的可视化规则）
+        """
         print("=== 抽取式吸附曲线完整数据处理与可视化 ===")
+        print("严格按照算法需求文档执行")
         print("="*60)
 
         # 创建输出文件夹
@@ -2325,87 +2556,156 @@ class AdsorptionCurveProcessor:
             print("基础清洗后无数据，程序结束")
             return
 
-        # 3. K-S检验清洗
+        # 3. 高级筛选：K-S检验和箱型图检验
         print("\n" + "="*40)
-        print("开始K-S检验数据清洗")
+        print("开始高级筛选：K-S检验和箱型图检验")
+        print("根据修改后需求文档：选择筛选后数据量更少的那组作为计算使用的数据")
+        
+        # 执行K-S检验筛选
+        print("\n执行K-S检验筛选...")
         self.cleaned_data_ks = self.ks_test_cleaning(basic_cleaned)
+        ks_count = len(self.cleaned_data_ks) if self.cleaned_data_ks is not None else 0
+        print(f"K-S检验筛选后数据量: {ks_count} 条")
 
-        # 4. 箱型图清洗
-        print("\n" + "="*40)
-        print("开始箱型图数据清洗")
+        # 执行箱型图筛选
+        print("\n执行箱型图筛选...")
         self.cleaned_data_boxplot = self.boxplot_cleaning(basic_cleaned)
+        boxplot_count = len(self.cleaned_data_boxplot) if self.cleaned_data_boxplot is not None else 0
+        print(f"箱型图筛选后数据量: {boxplot_count} 条")
+        
+        # 选择数据量更少的那组作为最终筛选结果
+        if ks_count > 0 and boxplot_count > 0:
+            if ks_count <= boxplot_count:
+                self.final_cleaned_data = self.cleaned_data_ks
+                self.selected_method = "K-S检验"
+                print(f"\n✅ 选择K-S检验筛选结果：{ks_count} 条数据（数据量更少）")
+            else:
+                self.final_cleaned_data = self.cleaned_data_boxplot
+                self.selected_method = "箱型图"
+                print(f"\n✅ 选择箱型图筛选结果：{boxplot_count} 条数据（数据量更少）")
+        elif ks_count > 0:
+            self.final_cleaned_data = self.cleaned_data_ks
+            self.selected_method = "K-S检验"
+            print(f"\n✅ 选择K-S检验筛选结果：{ks_count} 条数据（唯一有效结果）")
+        elif boxplot_count > 0:
+            self.final_cleaned_data = self.cleaned_data_boxplot
+            self.selected_method = "箱型图"
+            print(f"\n✅ 选择箱型图筛选结果：{boxplot_count} 条数据（唯一有效结果）")
+        else:
+            self.final_cleaned_data = None
+            self.selected_method = None
+            print("\n❌ 警告：K-S检验和箱型图筛选后均无有效数据")
 
-        # 5. 计算效率数据
-        if len(self.cleaned_data_ks) > 0:
-            self.efficiency_data_ks = self.calculate_efficiency_data(self.cleaned_data_ks, "K-S检验")
+        # 4. 计算效率数据（两套穿透率和效率规则）
+        print("\n" + "="*40)
+        print("计算效率数据：应用两套穿透率和效率规则")
+        print("根据修改后需求文档：")
+        print("1. 当进口0出口1列为2时，以风速切分的时间段，计算效率和穿透率")
+        print("2. 当进口0出口1列为0或1时，以基础清洗拼接的时间段，计算效率和穿透率")
+        
+        self.efficiency_data = None
+        if self.final_cleaned_data is not None and len(self.final_cleaned_data) > 0:
+            print(f"\n使用{self.selected_method}筛选结果计算效率数据...")
+            self.efficiency_data = self.calculate_efficiency_with_two_rules(self.final_cleaned_data, self.selected_method)
+        else:
+            print("\n无有效的筛选数据，跳过效率计算")
 
-        if len(self.cleaned_data_boxplot) > 0:
-            self.efficiency_data_boxplot = self.calculate_efficiency_data(self.cleaned_data_boxplot, "箱型图")
-
-        # 6. 预警分析
+        # 5. 预警分析
         print("\n" + "="*40)
         print("开始预警分析")
-        self.analyze_warning_system()
+        if self.efficiency_data is not None and len(self.efficiency_data) > 0:
+            self.analyze_warning_system_with_final_data()
+        else:
+            print("无有效效率数据，跳过预警分析")
 
-        # 7. 创建可视化
+    def analyze_warning_system_with_final_data(self):
+        """预警系统分析 - 基于最终筛选的效率数据进行预警建模和分析"""
+        print("\n=== 预警系统分析（基于最终筛选数据）===")
+        
+        # 重置预警数据
+        self.warning_events = []
+        self.warning_model.fitted = False
+        
+        if self.efficiency_data is None or len(self.efficiency_data) == 0:
+            print("无有效的效率数据，无法进行预警分析")
+            return
+            
+        print(f"使用{self.selected_method}筛选后的效率数据进行预警分析")
+        print(f"效率数据点数: {len(self.efficiency_data)}")
+        
+        # 提取时间和穿透率数据
+        time_data = self.efficiency_data['时间坐标'].values
+        breakthrough_data = self.efficiency_data['穿透率'].values
+        
+        print(f"时间范围: {time_data.min():.2f}h - {time_data.max():.2f}h")
+        print(f"穿透率范围: {breakthrough_data.min():.3f} - {breakthrough_data.max():.3f}")
+        
+        # 显示两套规则的数据分布
+        if '计算规则' in self.efficiency_data.columns:
+            rule1_count = len(self.efficiency_data[self.efficiency_data['计算规则'] == '规则1-风速段'])
+            rule2_count = len(self.efficiency_data[self.efficiency_data['计算规则'] == '规则2-拼接段'])
+            print(f"规则1数据点（风速段）: {rule1_count} 个")
+            print(f"规则2数据点（拼接段）: {rule2_count} 个")
+        
+        # 拟合预警模型
+        if self.warning_model.fit_model(time_data, breakthrough_data):
+            print("✅ 预警模型拟合成功")
+            
+            # 生成预警事件
+            for i, (time_point, breakthrough_ratio) in enumerate(zip(time_data, breakthrough_data)):
+                efficiency = (1 - breakthrough_ratio) * 100
+                warning_event = self.warning_model.generate_warning_event(time_point, efficiency)
+                if warning_event:
+                    self.warning_events.append(warning_event)
+            
+            print(f"生成预警事件: {len(self.warning_events)} 个")
+            
+            # 显示预警汇总
+            if hasattr(self, '_display_warning_summary'):
+                self._display_warning_summary()
+            
+        else:
+            print("❌ 预警模型拟合失败")
+            
+        print("预警系统分析完成")
+
+        # 6. 创建可视化（仅预警系统可视化）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 获取输出目录
+        cleaned_data_dir = "可视化项目/清洗后数据"
+        visualization_dir = "可视化项目/可视化图像"
 
-        # K-S检验可视化
-        if self.efficiency_data_ks is not None and len(self.efficiency_data_ks) > 0:
+        # 根据修改后需求文档：删除处理效率的可视化规则，只保留预警系统可视化
+        if self.warning_events or (hasattr(self.warning_model, 'fitted') and self.warning_model.fitted):
             print("\n" + "="*40)
-            print("创建K-S检验可视化")
-            ks_segments = self._create_time_segments(self.efficiency_data_ks)
-            if ks_segments:
-                fig_ks = self._create_final_visualization(ks_segments, "K-S检验清洗")
-                filename_ks = os.path.join(visualization_dir, f"{self.base_filename}_KS检验清洗_{timestamp}.png")
-                fig_ks.savefig(filename_ks, dpi=300, bbox_inches='tight')
-                print(f"K-S检验可视化图片已保存: {filename_ks}")
-                plt.show()
+            print("创建预警系统可视化（遵循现有可视化规则）")
 
-        # 箱型图可视化
-        if self.efficiency_data_boxplot is not None and len(self.efficiency_data_boxplot) > 0:
-            print("\n" + "="*40)
-            print("创建箱型图可视化")
-            box_segments = self._create_time_segments(self.efficiency_data_boxplot)
-            if box_segments:
-                fig_box = self._create_final_visualization(box_segments, "箱型图清洗")
-                filename_box = os.path.join(visualization_dir, f"{self.base_filename}_箱型图清洗_{timestamp}.png")
-                fig_box.savefig(filename_box, dpi=300, bbox_inches='tight')
-                print(f"箱型图可视化图片已保存: {filename_box}")
-                plt.show()
-
-        # 预警系统可视化
-        if self.warning_events or self.warning_model.fitted:
-            print("\n" + "="*40)
-            print("创建预警系统可视化")
-
-            # 选择最佳的效率数据
-            efficiency_data = None
-            if self.efficiency_data_ks is not None and len(self.efficiency_data_ks) > 0:
-                efficiency_data = self.efficiency_data_ks
-            elif self.efficiency_data_boxplot is not None and len(self.efficiency_data_boxplot) > 0:
-                efficiency_data = self.efficiency_data_boxplot
-
-            if efficiency_data is not None:
-                fig_warning = self.create_warning_visualization(efficiency_data)
+            if self.efficiency_data is not None and len(self.efficiency_data) > 0:
+                fig_warning = self.create_warning_visualization(self.efficiency_data)
                 filename_warning = os.path.join(visualization_dir, f"{self.base_filename}_预警系统_{timestamp}.png")
                 fig_warning.savefig(filename_warning, dpi=300, bbox_inches='tight')
                 print(f"预警系统可视化图片已保存: {filename_warning}")
                 plt.show()
+            else:
+                print("无有效效率数据，无法创建预警系统可视化")
+        else:
+            print("\n无预警事件或模型未拟合，跳过预警系统可视化")
 
-        # 8. 保存清洗后的数据
-        if len(self.cleaned_data_ks) > 0:
-            ks_filename = os.path.join(cleaned_data_dir, f"{self.base_filename}_KS检验清洗_{timestamp}.csv")
-            self.cleaned_data_ks.to_csv(ks_filename, index=False, encoding='utf-8-sig')
-            print(f"K-S检验清洗数据已保存: {ks_filename}")
+        # 7. 保存最终筛选后的数据
+        if self.final_cleaned_data is not None and len(self.final_cleaned_data) > 0:
+            final_filename = os.path.join(cleaned_data_dir, f"{self.base_filename}_{self.selected_method}筛选_{timestamp}.csv")
+            self.final_cleaned_data.to_csv(final_filename, index=False, encoding='utf-8-sig')
+            print(f"最终筛选数据已保存: {final_filename}")
 
-        if len(self.cleaned_data_boxplot) > 0:
-            box_filename = os.path.join(cleaned_data_dir, f"{self.base_filename}_箱型图清洗_{timestamp}.csv")
-            self.cleaned_data_boxplot.to_csv(box_filename, index=False, encoding='utf-8-sig')
-            print(f"箱型图清洗数据已保存: {box_filename}")
+        # 保存效率数据
+        if self.efficiency_data is not None and len(self.efficiency_data) > 0:
+            efficiency_filename = os.path.join(cleaned_data_dir, f"{self.base_filename}_效率数据_{timestamp}.csv")
+            self.efficiency_data.to_csv(efficiency_filename, index=False, encoding='utf-8-sig')
+            print(f"效率数据已保存: {efficiency_filename}")
 
-        # 9. 保存预警报告
-        if self.warning_events or self.warning_model.fitted:
+        # 8. 保存预警报告
+        if self.warning_events or (hasattr(self.warning_model, 'fitted') and self.warning_model.fitted):
             self._save_warning_report(cleaned_data_dir, timestamp)
 
         print("\n" + "="*60)
@@ -2496,7 +2796,7 @@ def main():
     print("="*60)
 
     # 数据文件路径 - 支持多种格式
-    data_file = "可视化项目/7.24.csv"  # 可以是 .csv, .xlsx, .xls 格式
+    data_file = "7.24.csv"  # 可以是 .csv, .xlsx, .xls 格式
 
     print(f"当前处理文件: {data_file}")
     print("支持的文件格式: CSV (.csv), Excel (.xlsx, .xls)")
