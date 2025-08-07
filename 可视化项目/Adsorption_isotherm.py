@@ -508,24 +508,78 @@ class AdsorptionCurveProcessor:
             print("✅ 识别为混合型数据")
             return 'mixed'
 
+    def _split_by_wind_speed(self, data: pd.DataFrame) -> pd.DataFrame:
+        """根据风速进行时间段切分
+        
+        风速切分规则：
+        1. 从检测到风速>=0.5的时间为起点，直至检测到风速<0.5的记录的时间结束
+        2. 以这种方式切分为一个个时间段
+        3. 去除不包含在任何时间段的数据
+        """
+        print("\n=== 按风速切分时间段 ===")
+        original_count = len(data)
+
+        if len(data) == 0:
+            print("数据为空，无法切分")
+            return data
+            
+        # 确保数据按时间排序
+        data = data.sort_values('创建时间').reset_index(drop=True)
+        
+        # 创建风速段标记
+        data['风速段'] = 0
+        wind_segment = 0
+        in_segment = False
+        
+        for i in range(len(data)):
+            current_speed = data.loc[i, '风管内风速值']
+            
+            # 当前未在时间段内，且检测到风速>=0.5，开始新时间段
+            if not in_segment and current_speed >= 0.5:
+                wind_segment += 1
+                in_segment = True
+                data.loc[i, '风速段'] = wind_segment
+            # 当前在时间段内，且风速仍然>=0.5，继续当前时间段
+            elif in_segment and current_speed >= 0.5:
+                data.loc[i, '风速段'] = wind_segment
+            # 当前在时间段内，但风速<0.5，结束当前时间段
+            elif in_segment and current_speed < 0.5:
+                in_segment = False
+                data.loc[i, '风速段'] = 0
+            # 当前未在时间段内，且风速<0.5，不属于任何时间段
+            else:
+                data.loc[i, '风速段'] = 0
+        
+        # 保留在风速段内的数据
+        valid_data = data[data['风速段'] > 0].copy()
+        removed_count = len(data) - len(valid_data)
+        
+        print(f"识别出 {wind_segment} 个风速段")
+        print(f"保留风速段内的数据: {len(valid_data)} 条 (剔除 {removed_count} 条)")
+        
+        return valid_data
+
     def basic_data_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
         """基础数据清洗 - 根据进口0出口1列值自适应处理"""
         print("\n=== 基础数据清洗 ===")
         original_count = len(data)
 
+        # 首先按风速进行时间段切分（根据需求文档第1点）
+        data = self._split_by_wind_speed(data)
+        
+        if len(data) == 0:
+            print("风速切分后无有效数据，程序结束")
+            return data
+
         # 识别数据类型
         data_type = self.identify_data_type(data)
 
-        # 1. 剔除风速<0.5的记录（所有类型通用）
-        data = data[data['风管内风速值'] >= 0.5].copy()
-        print(f"1. 剔除风速<0.5的记录: {len(data)} 条 (剔除 {original_count - len(data)} 条)")
-
-        # 2. 剔除风量=0的数据（所有类型通用）
+        # 剔除风量=0的数据（所有类型通用）
         before_flow_removal = len(data)
         data = data[data['风量'] > 0].copy()
-        print(f"2. 剔除风量=0的数据: {len(data)} 条 (剔除 {before_flow_removal - len(data)} 条)")
+        print(f"剔除风量=0的数据: {len(data)} 条 (剔除 {before_flow_removal - len(data)} 条)")
 
-        # 3. 根据进口0出口1列值选择不同的清洗方式
+        # 根据进口0出口1列值选择不同的清洗方式
         if data_type == 'simultaneous':
             # 进口0出口1=2：同时记录型数据清洗
             data = self._clean_simultaneous_records(data)
@@ -542,7 +596,13 @@ class AdsorptionCurveProcessor:
         return data
 
     def _clean_simultaneous_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗同时记录型数据（进口0出口1=2）"""
+        """清洗同时记录型数据（进口0出口1=2）
+        
+        同步型数据的清洗规则：
+        1. 去除进口或出口浓度为0的记录
+        2. 去除出口浓度大于进口浓度的记录
+        3. 计算穿透率和处理效率
+        """
         print("3. 处理同时记录型数据 (进口0出口1=2):")
 
         simultaneous_data = data[data['进口0出口1'] == 2].copy()
@@ -587,45 +647,255 @@ class AdsorptionCurveProcessor:
         return result_data
 
     def _clean_switching_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗切换型数据（进口0出口1=0或1）"""
+        """清洗切换型数据（进口0出口1=0或1）
+
+        切换型数据的清洗规则（根据需求文档）：
+        1. 根据进口0出口1列值切分时间段并打上标签
+        2. 根据进口0出口1列值分别去除相应浓度为0的记录
+        3. 匹配进口和出口时间段，去除出口浓度大于进口浓度平均值的记录
+        """
         print("3. 处理切换型数据 (进口0出口1=0或1):")
 
-        inlet_data = data[data['进口0出口1'] == 0].copy()
-        outlet_data = data[data['进口0出口1'] == 1].copy()
-        other_data = data[~data['进口0出口1'].isin([0, 1])].copy()
+        # 按时间排序
+        data = data.sort_values('创建时间').reset_index(drop=True)
 
-        print(f"   进口数据: {len(inlet_data)} 条")
-        print(f"   出口数据: {len(outlet_data)} 条")
+        # 根据需求文档：根据进口0出口1列值切分时间段并打上标签
+        data_with_segments = self._segment_switching_data(data)
 
-        # 3.1 根据进口0出口1列值分别去除相应浓度为0的记录
-        before_inlet_removal = len(inlet_data)
-        inlet_data = inlet_data[inlet_data['进口voc'] > 0].copy()
-        print(f"   3.1 去除进口浓度为0的记录: {len(inlet_data)} 条 (剔除 {before_inlet_removal - len(inlet_data)} 条)")
+        if len(data_with_segments) == 0:
+            print("   切换型数据时间段切分后无有效数据")
+            return pd.DataFrame()
 
-        before_outlet_removal = len(outlet_data)
-        outlet_data = outlet_data[outlet_data['出口voc'] > 0].copy()
-        print(f"   3.1 去除出口浓度为0的记录: {len(outlet_data)} 条 (剔除 {before_outlet_removal - len(outlet_data)} 条)")
+        # 根据进口0出口1列值分别去除相应浓度为0的记录
+        before_cleaning = len(data_with_segments)
 
-        # 3.2 通过时间匹配去除出口>进口的记录
-        if len(inlet_data) > 0 and len(outlet_data) > 0:
-            matched_data = self._match_switching_data(inlet_data, outlet_data)
+        # 去除进口浓度为0的记录（当进口0出口1=0时）
+        inlet_mask = (data_with_segments['进口0出口1'] == 0) & (data_with_segments['进口voc'] > 0)
+        # 去除出口浓度为0的记录（当进口0出口1=1时）
+        outlet_mask = (data_with_segments['进口0出口1'] == 1) & (data_with_segments['出口voc'] > 0)
+        # 保留其他类型的记录
+        other_mask = ~data_with_segments['进口0出口1'].isin([0, 1])
+
+        cleaned_data = data_with_segments[inlet_mask | outlet_mask | other_mask].copy()
+        removed_count = before_cleaning - len(cleaned_data)
+        print(f"   3.1 去除浓度为0的记录: {len(cleaned_data)} 条 (剔除 {removed_count} 条)")
+
+        # 根据需求文档：匹配进口和出口时间段，筛选出口浓度不能大于进口浓度平均值的记录
+        if len(cleaned_data) > 0:
+            final_data = self._match_and_filter_switching_segments(cleaned_data)
         else:
-            print("   警告: 缺少进口或出口数据，跳过时间匹配")
-            matched_data = pd.concat([inlet_data, outlet_data], ignore_index=True)
+            final_data = cleaned_data
 
-        # 合并数据
+        print(f"   切换型数据清洗完成: {len(final_data)} 条")
+        return final_data
+
+    def _segment_switching_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """根据需求文档：根据进口0出口1列值切分时间段并打上标签
+
+        切分规则：
+        - 从检测到进口0出口1列为0的记录开始，到检测到进口0出口1列为1的记录结束，标记为进口浓度时间段
+        - 从检测到进口0出口1列为1的记录开始，到检测到进口0出口1列为0的记录结束，标记为出口浓度时间段
+        """
+        print("   3.1 根据进口0出口1列值切分时间段并打上标签")
+
+        if len(data) == 0:
+            return data
+
+        # 确保数据按时间排序
+        data = data.sort_values('创建时间').reset_index(drop=True)
+
+        # 添加时间段标记列
+        data['浓度时间段'] = 0  # 0表示未分配，1表示进口时间段，2表示出口时间段
+        data['时间段序号'] = 0
+
+        segment_id = 0
+        current_segment_type = None  # None, 'inlet', 'outlet'
+
+        for i in range(len(data)):
+            current_value = data.loc[i, '进口0出口1']
+
+            if current_value == 0:  # 检测到进口记录
+                if current_segment_type != 'inlet':
+                    # 开始新的进口时间段
+                    segment_id += 1
+                    current_segment_type = 'inlet'
+                data.loc[i, '浓度时间段'] = 1  # 进口时间段
+                data.loc[i, '时间段序号'] = segment_id
+
+            elif current_value == 1:  # 检测到出口记录
+                if current_segment_type != 'outlet':
+                    # 开始新的出口时间段
+                    segment_id += 1
+                    current_segment_type = 'outlet'
+                data.loc[i, '浓度时间段'] = 2  # 出口时间段
+                data.loc[i, '时间段序号'] = segment_id
+
+            else:
+                # 其他类型的记录，保持当前时间段
+                if current_segment_type is not None:
+                    data.loc[i, '浓度时间段'] = 1 if current_segment_type == 'inlet' else 2
+                    data.loc[i, '时间段序号'] = segment_id
+
+        # 统计时间段信息
+        inlet_segments = data[data['浓度时间段'] == 1]['时间段序号'].nunique()
+        outlet_segments = data[data['浓度时间段'] == 2]['时间段序号'].nunique()
+        total_segments = data[data['浓度时间段'] > 0]['时间段序号'].nunique()
+
+        print(f"      识别出 {total_segments} 个时间段：{inlet_segments} 个进口时间段，{outlet_segments} 个出口时间段")
+
+        # 只保留被分配到时间段的数据
+        segmented_data = data[data['浓度时间段'] > 0].copy()
+        removed_count = len(data) - len(segmented_data)
+        print(f"      保留时间段内的数据: {len(segmented_data)} 条 (剔除 {removed_count} 条)")
+
+        return segmented_data
+
+    def _match_and_filter_switching_segments(self, data: pd.DataFrame) -> pd.DataFrame:
+        """根据需求文档：匹配进口和出口时间段，筛选出口浓度不能大于进口浓度平均值的记录"""
+        print("   3.2 匹配进口和出口时间段，筛选异常记录")
+
+        if len(data) == 0:
+            return data
+
+        # 分离进口和出口时间段
+        inlet_segments = data[data['浓度时间段'] == 1].copy()
+        outlet_segments = data[data['浓度时间段'] == 2].copy()
+        other_data = data[data['浓度时间段'] == 0].copy()
+
+        if len(inlet_segments) == 0 or len(outlet_segments) == 0:
+            print("      警告: 缺少进口或出口时间段，跳过匹配筛选")
+            return data
+
+        # 按时间段序号分组
+        inlet_groups = inlet_segments.groupby('时间段序号')
+        outlet_groups = outlet_segments.groupby('时间段序号')
+
+        valid_records = []
+        removed_count = 0
+
+        # 获取所有时间段序号并排序
+        all_segment_ids = sorted(data['时间段序号'].unique())
+
+        # 根据需求文档：根据第一个检测到的时间段为进口浓度或出口浓度，匹配下一个进口浓度时间段
+        i = 0
+        while i < len(all_segment_ids):
+            current_segment_id = all_segment_ids[i]
+
+            # 检查当前时间段类型
+            current_segment_data = data[data['时间段序号'] == current_segment_id]
+            if len(current_segment_data) == 0:
+                i += 1
+                continue
+
+            current_type = current_segment_data['浓度时间段'].iloc[0]
+
+            if current_type == 1:  # 当前是进口时间段
+                # 寻找下一个出口时间段进行匹配
+                next_outlet_segment_id = None
+                for j in range(i + 1, len(all_segment_ids)):
+                    next_segment_id = all_segment_ids[j]
+                    next_segment_data = data[data['时间段序号'] == next_segment_id]
+                    if len(next_segment_data) > 0 and next_segment_data['浓度时间段'].iloc[0] == 2:
+                        next_outlet_segment_id = next_segment_id
+                        break
+
+                if next_outlet_segment_id is not None:
+                    # 匹配成功，进行筛选
+                    inlet_data = data[data['时间段序号'] == current_segment_id]
+                    outlet_data = data[data['时间段序号'] == next_outlet_segment_id]
+
+                    # 计算进口浓度平均值
+                    inlet_avg = inlet_data['进口voc'].mean()
+
+                    # 筛选：出口浓度不能大于进口浓度平均值
+                    valid_outlet_data = outlet_data[outlet_data['出口voc'] <= inlet_avg]
+                    filtered_outlet_count = len(outlet_data) - len(valid_outlet_data)
+                    removed_count += filtered_outlet_count
+
+                    # 保留有效数据
+                    valid_records.append(inlet_data)
+                    if len(valid_outlet_data) > 0:
+                        valid_records.append(valid_outlet_data)
+
+                    print(f"      匹配时间段 {current_segment_id}(进口) 和 {next_outlet_segment_id}(出口):")
+                    print(f"        进口平均浓度: {inlet_avg:.2f}, 出口数据: {len(outlet_data)} 条 -> {len(valid_outlet_data)} 条")
+
+                    # 跳过已处理的出口时间段
+                    i = j + 1
+                else:
+                    # 没有找到匹配的出口时间段，保留进口数据
+                    inlet_data = data[data['时间段序号'] == current_segment_id]
+                    valid_records.append(inlet_data)
+                    i += 1
+
+            elif current_type == 2:  # 当前是出口时间段
+                # 寻找下一个进口时间段进行匹配
+                next_inlet_segment_id = None
+                for j in range(i + 1, len(all_segment_ids)):
+                    next_segment_id = all_segment_ids[j]
+                    next_segment_data = data[data['时间段序号'] == next_segment_id]
+                    if len(next_segment_data) > 0 and next_segment_data['浓度时间段'].iloc[0] == 1:
+                        next_inlet_segment_id = next_segment_id
+                        break
+
+                if next_inlet_segment_id is not None:
+                    # 匹配成功，进行筛选
+                    outlet_data = data[data['时间段序号'] == current_segment_id]
+                    inlet_data = data[data['时间段序号'] == next_inlet_segment_id]
+
+                    # 计算进口浓度平均值
+                    inlet_avg = inlet_data['进口voc'].mean()
+
+                    # 筛选：出口浓度不能大于进口浓度平均值
+                    valid_outlet_data = outlet_data[outlet_data['出口voc'] <= inlet_avg]
+                    filtered_outlet_count = len(outlet_data) - len(valid_outlet_data)
+                    removed_count += filtered_outlet_count
+
+                    # 保留有效数据
+                    if len(valid_outlet_data) > 0:
+                        valid_records.append(valid_outlet_data)
+                    valid_records.append(inlet_data)
+
+                    print(f"      匹配时间段 {current_segment_id}(出口) 和 {next_inlet_segment_id}(进口):")
+                    print(f"        进口平均浓度: {inlet_avg:.2f}, 出口数据: {len(outlet_data)} 条 -> {len(valid_outlet_data)} 条")
+
+                    # 跳过已处理的进口时间段
+                    i = j + 1
+                else:
+                    # 没有找到匹配的进口时间段，保留出口数据（但可能需要其他筛选逻辑）
+                    outlet_data = data[data['时间段序号'] == current_segment_id]
+                    valid_records.append(outlet_data)
+                    i += 1
+            else:
+                i += 1
+
+        # 添加其他数据
         if len(other_data) > 0:
-            result_data = pd.concat([matched_data, other_data], ignore_index=True)
+            valid_records.append(other_data)
+
+        # 合并所有有效记录
+        if valid_records:
+            result_data = pd.concat(valid_records, ignore_index=True)
+            result_data = result_data.sort_values('创建时间').reset_index(drop=True)
+            print(f"      时间段匹配筛选完成: 保留 {len(result_data)} 条，移除 {removed_count} 条异常记录")
+            return result_data
         else:
-            result_data = matched_data
-
-        result_data = result_data.sort_values('创建时间').reset_index(drop=True)
-        print(f"   切换型数据清洗完成: {len(result_data)} 条")
-
-        return result_data
+            print("      警告: 时间段匹配筛选后无有效数据")
+            return pd.DataFrame()
 
     def _clean_mixed_records(self, data: pd.DataFrame) -> pd.DataFrame:
-        """清洗混合型数据"""
+        """清洗混合型数据
+        
+        混合型数据的清洗规则：
+        1. 根据进口0出口1列值分别处理同步型和切换型数据
+        2. 对于同步型数据（进口0出口1=2）：
+           - 去除进口或出口浓度为0的记录
+           - 去除出口浓度大于进口浓度的记录
+        3. 对于切换型数据（进口0出口1=0或1）：
+           - 根据进口0出口1列值切分时间段并打上标签
+           - 根据进口0出口1列值分别去除相应浓度为0的记录
+           - 通过时间匹配去除出口浓度大于进口浓度的记录
+        """
         print("3. 处理混合型数据:")
 
         # 分别处理不同类型的数据
@@ -744,51 +1014,138 @@ class AdsorptionCurveProcessor:
         return data
 
     def ks_test_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
-        """K-S检验数据清洗"""
+        """K-S检验数据清洗
+        
+        K-S检验清洗规则：
+        1. 对进口和出口VOC数据分别进行K-S检验
+        2. 根据是否正态分布采用不同的异常值剔除方法：
+           - 正态分布：使用3σ准则
+           - 非正态分布：使用Z-score方法
+        """
         print("\n=== K-S检验数据清洗 ===")
         
-        # 分别处理进口和出口数据
-        inlet_data = data[data['进口0出口1'] == 0].copy()
-        outlet_data = data[data['进口0出口1'] == 1].copy()
-        
+        # 获取数据类型
+        data_type = self.identify_data_type(data)
         cleaned_data = []
         
-        for data_type, subset in [('进口', inlet_data), ('出口', outlet_data)]:
-            if len(subset) == 0:
-                continue
+        if data_type == 'simultaneous':
+            # 处理同时记录型数据（进口0出口1=2）
+            simultaneous_data = data[data['进口0出口1'] == 2].copy()
+            
+            # 分别处理进口和出口VOC
+            for voc_type, column in [('进口', '进口voc'), ('出口', '出口voc')]:
+                voc_values = simultaneous_data[column].dropna()
                 
-            voc_column = '进口voc' if data_type == '进口' else '出口voc'
-            voc_values = subset[voc_column].dropna()
-            
-            if len(voc_values) < 10:  # 数据量太少，跳过检验
-                cleaned_data.append(subset)
-                print(f"{data_type}数据量太少({len(voc_values)}条)，跳过K-S检验")
-                continue
-            
-            # K-S检验正态性
-            _, p_value = stats.kstest(voc_values, 'norm', args=(voc_values.mean(), voc_values.std()))
-            print(f"{data_type}数据K-S检验 p值: {p_value:.4f}")
-            
-            if p_value > 0.05:
-                # 正态分布，使用3σ准则
-                mean_val = voc_values.mean()
-                std_val = voc_values.std()
-                threshold = 3 * std_val
+                if len(voc_values) < 10:  # 数据量太少，跳过检验
+                    print(f"{voc_type}VOC数据量太少({len(voc_values)}条)，跳过K-S检验")
+                    continue
                 
-                mask = np.abs(voc_values - mean_val) <= threshold
-                cleaned_subset = subset[mask]
-                removed_count = len(subset) - len(cleaned_subset)
-                print(f"{data_type}数据正态分布，使用3σ准则: 保留{len(cleaned_subset)}条，剔除{removed_count}条")
+                # K-S检验正态性
+                _, p_value = stats.kstest(voc_values, 'norm', args=(voc_values.mean(), voc_values.std()))
+                print(f"{voc_type}VOC数据K-S检验 p值: {p_value:.4f}")
                 
-            else:
-                # 非正态分布，使用Z-score
-                z_scores = np.abs(stats.zscore(voc_values))
-                mask = z_scores <= 3
-                cleaned_subset = subset[mask]
-                removed_count = len(subset) - len(cleaned_subset)
-                print(f"{data_type}数据非正态分布，使用Z-score: 保留{len(cleaned_subset)}条，剔除{removed_count}条")
+                if p_value > 0.05:
+                    # 正态分布，使用3σ准则
+                    mean_val = voc_values.mean()
+                    std_val = voc_values.std()
+                    threshold = 3 * std_val
+                    
+                    before_cleaning = len(simultaneous_data)
+                    simultaneous_data = simultaneous_data[
+                        np.abs(simultaneous_data[column] - mean_val) <= threshold
+                    ].copy()
+                    removed_count = before_cleaning - len(simultaneous_data)
+                    print(f"{voc_type}VOC数据正态分布，使用3σ准则: 保留{len(simultaneous_data)}条，剔除{removed_count}条")
+                    
+                else:
+                    # 非正态分布，使用Z-score
+                    z_scores = np.abs(stats.zscore(voc_values))
+                    threshold_indices = z_scores <= 3
+                    valid_indices = voc_values.index[threshold_indices]
+                    
+                    before_cleaning = len(simultaneous_data)
+                    simultaneous_data = simultaneous_data[simultaneous_data.index.isin(valid_indices)].copy()
+                    removed_count = before_cleaning - len(simultaneous_data)
+                    print(f"{voc_type}VOC数据非正态分布，使用Z-score: 保留{len(simultaneous_data)}条，剔除{removed_count}条")
             
-            cleaned_data.append(cleaned_subset)
+            if len(simultaneous_data) > 0:
+                cleaned_data.append(simultaneous_data)
+        
+        elif data_type in ['switching', 'mixed']:
+            # 处理切换型数据（进口0出口1=0或1）或混合型数据
+            inlet_data = data[data['进口0出口1'] == 0].copy()
+            outlet_data = data[data['进口0出口1'] == 1].copy()
+            other_data = data[~data['进口0出口1'].isin([0, 1])].copy()
+            
+            # 处理进口数据
+            if len(inlet_data) > 0:
+                voc_values = inlet_data['进口voc'].dropna()
+                
+                if len(voc_values) < 10:  # 数据量太少，跳过检验
+                    cleaned_data.append(inlet_data)
+                    print(f"进口数据量太少({len(voc_values)}条)，跳过K-S检验")
+                else:
+                    # K-S检验正态性
+                    _, p_value = stats.kstest(voc_values, 'norm', args=(voc_values.mean(), voc_values.std()))
+                    print(f"进口数据K-S检验 p值: {p_value:.4f}")
+                    
+                    if p_value > 0.05:
+                        # 正态分布，使用3σ准则
+                        mean_val = voc_values.mean()
+                        std_val = voc_values.std()
+                        threshold = 3 * std_val
+                        
+                        mask = np.abs(voc_values - mean_val) <= threshold
+                        cleaned_inlet = inlet_data[mask]
+                        removed_count = len(inlet_data) - len(cleaned_inlet)
+                        print(f"进口数据正态分布，使用3σ准则: 保留{len(cleaned_inlet)}条，剔除{removed_count}条")
+                        
+                    else:
+                        # 非正态分布，使用Z-score
+                        z_scores = np.abs(stats.zscore(voc_values))
+                        mask = z_scores <= 3
+                        cleaned_inlet = inlet_data[mask]
+                        removed_count = len(inlet_data) - len(cleaned_inlet)
+                        print(f"进口数据非正态分布，使用Z-score: 保留{len(cleaned_inlet)}条，剔除{removed_count}条")
+                    
+                    cleaned_data.append(cleaned_inlet)
+            
+            # 处理出口数据
+            if len(outlet_data) > 0:
+                voc_values = outlet_data['出口voc'].dropna()
+                
+                if len(voc_values) < 10:  # 数据量太少，跳过检验
+                    cleaned_data.append(outlet_data)
+                    print(f"出口数据量太少({len(voc_values)}条)，跳过K-S检验")
+                else:
+                    # K-S检验正态性
+                    _, p_value = stats.kstest(voc_values, 'norm', args=(voc_values.mean(), voc_values.std()))
+                    print(f"出口数据K-S检验 p值: {p_value:.4f}")
+                    
+                    if p_value > 0.05:
+                        # 正态分布，使用3σ准则
+                        mean_val = voc_values.mean()
+                        std_val = voc_values.std()
+                        threshold = 3 * std_val
+                        
+                        mask = np.abs(voc_values - mean_val) <= threshold
+                        cleaned_outlet = outlet_data[mask]
+                        removed_count = len(outlet_data) - len(cleaned_outlet)
+                        print(f"出口数据正态分布，使用3σ准则: 保留{len(cleaned_outlet)}条，剔除{removed_count}条")
+                        
+                    else:
+                        # 非正态分布，使用Z-score
+                        z_scores = np.abs(stats.zscore(voc_values))
+                        mask = z_scores <= 3
+                        cleaned_outlet = outlet_data[mask]
+                        removed_count = len(outlet_data) - len(cleaned_outlet)
+                        print(f"出口数据非正态分布，使用Z-score: 保留{len(cleaned_outlet)}条，剔除{removed_count}条")
+                    
+                    cleaned_data.append(cleaned_outlet)
+            
+            # 添加其他数据
+            if len(other_data) > 0:
+                cleaned_data.append(other_data)
         
         # 合并清洗后的数据
         if cleaned_data:
@@ -800,45 +1157,118 @@ class AdsorptionCurveProcessor:
             return pd.DataFrame()
     
     def boxplot_cleaning(self, data: pd.DataFrame) -> pd.DataFrame:
-        """箱型图异常值清洗"""
+        """箱型图异常值清洗
+        
+        箱型图异常值清洗规则：
+        1. 分别对进口和出口VOC数据进行箱型图异常值清洗
+        2. 计算四分位数（Q1、Q3）和四分位距（IQR）
+        3. 设定异常值边界：下界 = Q1 - 1.5*IQR，上界 = Q3 + 1.5*IQR
+        4. 剔除边界外的异常值
+        """
         print("\n=== 箱型图异常值清洗 ===")
         
-        # 分别处理进口和出口数据
-        inlet_data = data[data['进口0出口1'] == 0].copy()
-        outlet_data = data[data['进口0出口1'] == 1].copy()
-        
+        # 获取数据类型
+        data_type = self.identify_data_type(data)
         cleaned_data = []
         
-        for data_type, subset in [('进口', inlet_data), ('出口', outlet_data)]:
-            if len(subset) == 0:
-                continue
+        if data_type == 'simultaneous':
+            # 处理同时记录型数据（进口0出口1=2）
+            simultaneous_data = data[data['进口0出口1'] == 2].copy()
+            
+            # 分别处理进口和出口VOC
+            for voc_type, column in [('进口', '进口voc'), ('出口', '出口voc')]:
+                voc_values = simultaneous_data[column].dropna()
                 
-            voc_column = '进口voc' if data_type == '进口' else '出口voc'
-            voc_values = subset[voc_column].dropna()
+                if len(voc_values) < 4:  # 数据量太少，跳过清洗
+                    print(f"{voc_type}VOC数据量太少({len(voc_values)}条)，跳过箱型图清洗")
+                    continue
+                
+                # 计算四分位数
+                Q1 = voc_values.quantile(0.25)
+                Q3 = voc_values.quantile(0.75)
+                IQR = Q3 - Q1
+                
+                # 计算异常值边界
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                
+                # 过滤异常值
+                before_cleaning = len(simultaneous_data)
+                simultaneous_data = simultaneous_data[
+                    (simultaneous_data[column] >= lower_bound) & 
+                    (simultaneous_data[column] <= upper_bound)
+                ].copy()
+                removed_count = before_cleaning - len(simultaneous_data)
+                
+                print(f"{voc_type}VOC数据箱型图清洗: Q1={Q1:.2f}, Q3={Q3:.2f}, IQR={IQR:.2f}")
+                print(f"  边界: [{lower_bound:.2f}, {upper_bound:.2f}], 保留{len(simultaneous_data)}条，剔除{removed_count}条")
             
-            if len(voc_values) < 4:  # 数据量太少，跳过清洗
-                cleaned_data.append(subset)
-                print(f"{data_type}数据量太少({len(voc_values)}条)，跳过箱型图清洗")
-                continue
+            if len(simultaneous_data) > 0:
+                cleaned_data.append(simultaneous_data)
+        
+        elif data_type in ['switching', 'mixed']:
+            # 处理切换型数据（进口0出口1=0或1）或混合型数据
+            inlet_data = data[data['进口0出口1'] == 0].copy()
+            outlet_data = data[data['进口0出口1'] == 1].copy()
+            other_data = data[~data['进口0出口1'].isin([0, 1])].copy()
             
-            # 计算四分位数
-            Q1 = voc_values.quantile(0.25)
-            Q3 = voc_values.quantile(0.75)
-            IQR = Q3 - Q1
+            # 处理进口数据
+            if len(inlet_data) > 0:
+                voc_values = inlet_data['进口voc'].dropna()
+                
+                if len(voc_values) < 4:  # 数据量太少，跳过清洗
+                    cleaned_data.append(inlet_data)
+                    print(f"进口数据量太少({len(voc_values)}条)，跳过箱型图清洗")
+                else:
+                    # 计算四分位数
+                    Q1 = voc_values.quantile(0.25)
+                    Q3 = voc_values.quantile(0.75)
+                    IQR = Q3 - Q1
+                    
+                    # 计算异常值边界
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    
+                    # 过滤异常值
+                    mask = (voc_values >= lower_bound) & (voc_values <= upper_bound)
+                    cleaned_inlet = inlet_data[mask]
+                    removed_count = len(inlet_data) - len(cleaned_inlet)
+                    
+                    print(f"进口数据箱型图清洗: Q1={Q1:.2f}, Q3={Q3:.2f}, IQR={IQR:.2f}")
+                    print(f"  边界: [{lower_bound:.2f}, {upper_bound:.2f}], 保留{len(cleaned_inlet)}条，剔除{removed_count}条")
+                    
+                    cleaned_data.append(cleaned_inlet)
             
-            # 计算异常值边界
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
+            # 处理出口数据
+            if len(outlet_data) > 0:
+                voc_values = outlet_data['出口voc'].dropna()
+                
+                if len(voc_values) < 4:  # 数据量太少，跳过清洗
+                    cleaned_data.append(outlet_data)
+                    print(f"出口数据量太少({len(voc_values)}条)，跳过箱型图清洗")
+                else:
+                    # 计算四分位数
+                    Q1 = voc_values.quantile(0.25)
+                    Q3 = voc_values.quantile(0.75)
+                    IQR = Q3 - Q1
+                    
+                    # 计算异常值边界
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    
+                    # 过滤异常值
+                    mask = (voc_values >= lower_bound) & (voc_values <= upper_bound)
+                    cleaned_outlet = outlet_data[mask]
+                    removed_count = len(outlet_data) - len(cleaned_outlet)
+                    
+                    print(f"出口数据箱型图清洗: Q1={Q1:.2f}, Q3={Q3:.2f}, IQR={IQR:.2f}")
+                    print(f"  边界: [{lower_bound:.2f}, {upper_bound:.2f}], 保留{len(cleaned_outlet)}条，剔除{removed_count}条")
+                    
+                    cleaned_data.append(cleaned_outlet)
             
-            # 过滤异常值
-            mask = (voc_values >= lower_bound) & (voc_values <= upper_bound)
-            cleaned_subset = subset[mask]
-            removed_count = len(subset) - len(cleaned_subset)
-            
-            print(f"{data_type}数据箱型图清洗: Q1={Q1:.2f}, Q3={Q3:.2f}, IQR={IQR:.2f}")
-            print(f"  边界: [{lower_bound:.2f}, {upper_bound:.2f}], 保留{len(cleaned_subset)}条，剔除{removed_count}条")
-            
-            cleaned_data.append(cleaned_subset)
+            # 添加其他数据
+            if len(other_data) > 0:
+                cleaned_data.append(other_data)
         
         # 合并清洗后的数据
         if cleaned_data:
@@ -857,94 +1287,222 @@ class AdsorptionCurveProcessor:
             print(f"警告: {method_name}数据为空")
             return None
 
-        # 分离进出口数据
-        inlet_data = data[data['进口0出口1'] == 0].copy()
-        outlet_data = data[data['进口0出口1'] == 1].copy()
+        # 识别数据类型
+        data_type = self.identify_data_type(data)
 
-        print(f"进口数据: {len(inlet_data)} 条")
-        print(f"出口数据: {len(outlet_data)} 条")
-
-        if len(inlet_data) == 0 or len(outlet_data) == 0:
-            print(f"警告: {method_name}缺少进口或出口数据")
+        if data_type == 'simultaneous':
+            # 同时记录型数据：直接使用已计算的穿透率和效率
+            return self._calculate_efficiency_for_simultaneous(data, method_name)
+        elif data_type in ['switching', 'mixed']:
+            # 切换型数据：根据时间段匹配计算效率
+            return self._calculate_efficiency_for_switching(data, method_name)
+        else:
+            print(f"警告: 未知数据类型，无法计算效率")
             return None
 
-        # 按时间排序
-        inlet_data = inlet_data.sort_values('创建时间')
-        outlet_data = outlet_data.sort_values('创建时间')
+    def _calculate_efficiency_for_simultaneous(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
+        """为同时记录型数据计算效率"""
+        simultaneous_data = data[data['进口0出口1'] == 2].copy()
 
-        # 计算效率数据
+        if len(simultaneous_data) == 0:
+            print(f"警告: {method_name}无同时记录数据")
+            return None
+
+        print(f"同时记录数据: {len(simultaneous_data)} 条")
+
+        # 按风速段分组计算效率
         efficiency_records = []
+        start_time = simultaneous_data['创建时间'].min()
 
-        # 获取所有时间点并排序
-        all_times = sorted(data['创建时间'].unique())
+        # 按风速段分组
+        wind_segments = simultaneous_data['风速段'].unique()
+        wind_segments = wind_segments[wind_segments > 0]  # 只处理有效风速段
 
-        # 识别连续的时间段（间隔超过1小时认为是不同时间段）
-        time_segments = []
-        current_segment = [all_times[0]]
+        for segment_id in sorted(wind_segments):
+            segment_data = simultaneous_data[simultaneous_data['风速段'] == segment_id]
 
-        for i in range(1, len(all_times)):
-            time_diff = (all_times[i] - all_times[i-1]).total_seconds()
-            if time_diff > 3600:  # 间隔超过1小时（3600秒）
-                time_segments.append(current_segment)
-                current_segment = [all_times[i]]
-            else:
-                current_segment.append(all_times[i])
+            if len(segment_data) > 0:
+                # 计算该风速段的平均效率和穿透率
+                avg_efficiency = segment_data['处理效率'].mean()
+                avg_breakthrough = segment_data['穿透率'].mean()
+                avg_inlet = segment_data['进口voc'].mean()
+                avg_outlet = segment_data['出口voc'].mean()
 
-        if current_segment:
-            time_segments.append(current_segment)
-
-        print(f"识别到 {len(time_segments)} 个不连续时间段")
-
-        # 为每个时间段计算效率
-        start_time = data['创建时间'].min()
-
-        for segment_idx, time_segment in enumerate(time_segments):
-            segment_start = time_segment[0]
-            segment_end = time_segment[-1]
-
-            # 获取该时间段的数据
-            segment_data = data[
-                (data['创建时间'] >= segment_start) &
-                (data['创建时间'] <= segment_end)
-            ]
-
-            segment_inlet = segment_data[segment_data['进口0出口1'] == 0]
-            segment_outlet = segment_data[segment_data['进口0出口1'] == 1]
-
-            if len(segment_inlet) > 0 and len(segment_outlet) > 0:
-                # 计算平均浓度
-                avg_inlet = segment_inlet['进口voc'].mean()
-                avg_outlet = segment_outlet['出口voc'].mean()
-
-                # 根据需求文档：计算出口浓度/进口浓度的比值（穿透率）
-                if avg_inlet > 0:
-                    breakthrough_ratio = avg_outlet / avg_inlet  # 穿透率 = 出口浓度/进口浓度
-                    efficiency = (1 - breakthrough_ratio) * 100  # 效率 = (1 - 穿透率) * 100%
-                else:
-                    breakthrough_ratio = 0.0
-                    efficiency = 100.0
-
-                # 计算时间坐标（秒）
+                # 计算时间坐标（使用风速段的中间时间）
+                segment_start = segment_data['创建时间'].min()
+                segment_end = segment_data['创建时间'].max()
                 segment_mid_time = segment_start + (segment_end - segment_start) / 2
                 time_seconds = (segment_mid_time - start_time).total_seconds()
 
                 efficiency_records.append({
-                    'time': time_seconds,  # 改为秒
-                    'efficiency': efficiency,
-                    'breakthrough_ratio': breakthrough_ratio,  # 添加穿透率
+                    'time': time_seconds,
+                    'efficiency': avg_efficiency,
+                    'breakthrough_ratio': avg_breakthrough,
                     'inlet_conc': avg_inlet,
                     'outlet_conc': avg_outlet,
                     'data_count': len(segment_data),
                     'window_start': segment_start,
                     'window_end': segment_end,
-                    'segment_idx': segment_idx + 1
+                    'segment_idx': int(segment_id)
                 })
 
-                print(f"时段{segment_idx+1}: 进口={avg_inlet:.2f}, 出口={avg_outlet:.2f}, 穿透率={breakthrough_ratio:.3f}, 效率={efficiency:.1f}%")
+                print(f"风速段{segment_id}: 进口={avg_inlet:.2f}, 出口={avg_outlet:.2f}, 穿透率={avg_breakthrough:.3f}, 效率={avg_efficiency:.1f}%")
 
         if efficiency_records:
             efficiency_df = pd.DataFrame(efficiency_records)
-            print(f"生成效率数据: {len(efficiency_df)} 个时间段")
+            print(f"生成效率数据: {len(efficiency_df)} 个风速段")
+            print(f"平均效率: {efficiency_df['efficiency'].mean():.2f}%")
+            print(f"平均穿透率: {efficiency_df['breakthrough_ratio'].mean():.3f}")
+            return efficiency_df
+        else:
+            print(f"无法生成{method_name}效率数据")
+            return None
+
+    def _calculate_efficiency_for_switching(self, data: pd.DataFrame, method_name: str) -> Optional[pd.DataFrame]:
+        """为切换型数据计算效率 - 根据需求文档的匹配逻辑"""
+        print(f"切换型数据效率计算")
+
+        # 检查是否有时间段标记
+        if '时间段序号' not in data.columns or '浓度时间段' not in data.columns:
+            print(f"警告: 切换型数据缺少时间段标记，无法计算效率")
+            return None
+
+        efficiency_records = []
+        start_time = data['创建时间'].min()
+
+        # 按风速段分组处理
+        wind_segments = data['风速段'].unique()
+        wind_segments = wind_segments[wind_segments > 0]  # 只处理有效风速段
+
+        for wind_segment_id in sorted(wind_segments):
+            wind_segment_data = data[data['风速段'] == wind_segment_id]
+
+            # 在每个风速段内，按浓度时间段序号分组
+            segment_ids = sorted(wind_segment_data['时间段序号'].unique())
+
+            # 根据需求文档：匹配进口和出口时间段
+            i = 0
+            while i < len(segment_ids):
+                current_segment_id = segment_ids[i]
+                current_segment_data = wind_segment_data[wind_segment_data['时间段序号'] == current_segment_id]
+
+                if len(current_segment_data) == 0:
+                    i += 1
+                    continue
+
+                current_type = current_segment_data['浓度时间段'].iloc[0]
+
+                if current_type == 1:  # 进口时间段
+                    # 寻找下一个出口时间段
+                    next_outlet_segment_id = None
+                    for j in range(i + 1, len(segment_ids)):
+                        next_segment_id = segment_ids[j]
+                        next_segment_data = wind_segment_data[wind_segment_data['时间段序号'] == next_segment_id]
+                        if len(next_segment_data) > 0 and next_segment_data['浓度时间段'].iloc[0] == 2:
+                            next_outlet_segment_id = next_segment_id
+                            break
+
+                    if next_outlet_segment_id is not None:
+                        # 匹配成功，计算效率
+                        inlet_data = wind_segment_data[wind_segment_data['时间段序号'] == current_segment_id]
+                        outlet_data = wind_segment_data[wind_segment_data['时间段序号'] == next_outlet_segment_id]
+
+                        avg_inlet = inlet_data['进口voc'].mean()
+                        avg_outlet = outlet_data['出口voc'].mean()
+
+                        if avg_inlet > 0:
+                            breakthrough_ratio = avg_outlet / avg_inlet
+                            efficiency = (1 - breakthrough_ratio) * 100
+                        else:
+                            breakthrough_ratio = 0.0
+                            efficiency = 100.0
+
+                        # 计算时间坐标（使用两个时间段的中间时间）
+                        combined_start = min(inlet_data['创建时间'].min(), outlet_data['创建时间'].min())
+                        combined_end = max(inlet_data['创建时间'].max(), outlet_data['创建时间'].max())
+                        combined_mid_time = combined_start + (combined_end - combined_start) / 2
+                        time_seconds = (combined_mid_time - start_time).total_seconds()
+
+                        efficiency_records.append({
+                            'time': time_seconds,
+                            'efficiency': efficiency,
+                            'breakthrough_ratio': breakthrough_ratio,
+                            'inlet_conc': avg_inlet,
+                            'outlet_conc': avg_outlet,
+                            'data_count': len(inlet_data) + len(outlet_data),
+                            'window_start': combined_start,
+                            'window_end': combined_end,
+                            'segment_idx': len(efficiency_records) + 1,
+                            'wind_segment': wind_segment_id,
+                            'inlet_segment': current_segment_id,
+                            'outlet_segment': next_outlet_segment_id
+                        })
+
+                        print(f"风速段{wind_segment_id}-匹配段{current_segment_id}+{next_outlet_segment_id}: 进口={avg_inlet:.2f}, 出口={avg_outlet:.2f}, 穿透率={breakthrough_ratio:.3f}, 效率={efficiency:.1f}%")
+
+                        # 跳过已处理的出口时间段
+                        i = j + 1
+                    else:
+                        i += 1
+
+                elif current_type == 2:  # 出口时间段
+                    # 寻找下一个进口时间段
+                    next_inlet_segment_id = None
+                    for j in range(i + 1, len(segment_ids)):
+                        next_segment_id = segment_ids[j]
+                        next_segment_data = wind_segment_data[wind_segment_data['时间段序号'] == next_segment_id]
+                        if len(next_segment_data) > 0 and next_segment_data['浓度时间段'].iloc[0] == 1:
+                            next_inlet_segment_id = next_segment_id
+                            break
+
+                    if next_inlet_segment_id is not None:
+                        # 匹配成功，计算效率
+                        outlet_data = wind_segment_data[wind_segment_data['时间段序号'] == current_segment_id]
+                        inlet_data = wind_segment_data[wind_segment_data['时间段序号'] == next_inlet_segment_id]
+
+                        avg_inlet = inlet_data['进口voc'].mean()
+                        avg_outlet = outlet_data['出口voc'].mean()
+
+                        if avg_inlet > 0:
+                            breakthrough_ratio = avg_outlet / avg_inlet
+                            efficiency = (1 - breakthrough_ratio) * 100
+                        else:
+                            breakthrough_ratio = 0.0
+                            efficiency = 100.0
+
+                        # 计算时间坐标
+                        combined_start = min(inlet_data['创建时间'].min(), outlet_data['创建时间'].min())
+                        combined_end = max(inlet_data['创建时间'].max(), outlet_data['创建时间'].max())
+                        combined_mid_time = combined_start + (combined_end - combined_start) / 2
+                        time_seconds = (combined_mid_time - start_time).total_seconds()
+
+                        efficiency_records.append({
+                            'time': time_seconds,
+                            'efficiency': efficiency,
+                            'breakthrough_ratio': breakthrough_ratio,
+                            'inlet_conc': avg_inlet,
+                            'outlet_conc': avg_outlet,
+                            'data_count': len(inlet_data) + len(outlet_data),
+                            'window_start': combined_start,
+                            'window_end': combined_end,
+                            'segment_idx': len(efficiency_records) + 1,
+                            'wind_segment': wind_segment_id,
+                            'inlet_segment': next_inlet_segment_id,
+                            'outlet_segment': current_segment_id
+                        })
+
+                        print(f"风速段{wind_segment_id}-匹配段{current_segment_id}+{next_inlet_segment_id}: 进口={avg_inlet:.2f}, 出口={avg_outlet:.2f}, 穿透率={breakthrough_ratio:.3f}, 效率={efficiency:.1f}%")
+
+                        # 跳过已处理的进口时间段
+                        i = j + 1
+                    else:
+                        i += 1
+                else:
+                    i += 1
+
+        if efficiency_records:
+            efficiency_df = pd.DataFrame(efficiency_records)
+            print(f"生成效率数据: {len(efficiency_df)} 个匹配时间段")
             print(f"平均效率: {efficiency_df['efficiency'].mean():.2f}%")
             print(f"平均穿透率: {efficiency_df['breakthrough_ratio'].mean():.3f}")
             return efficiency_df
